@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-game
+  namespace: viberide
+  labels:
+    app.kubernetes.io/name: web-game
+    app.kubernetes.io/part-of: viberide
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: web-game
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

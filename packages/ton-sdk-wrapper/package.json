@@ -1,0 +1,40 @@
+{
+  "name": "@viberide/ton-sdk-wrapper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TonIntegrationModule: TON Connect wallet sessions, @ton/core payload builders and NFT skin lookup behind a single TonModule interface with disabled/mock implementations",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@ton/core": "^0.60.1",
+    "@tonconnect/ui": "^2.1.0",
+    "@viberide/shared": "workspace:*",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.3",
+    "@vitest/coverage-v8": "^3.1.4",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}

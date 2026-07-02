@@ -1,0 +1,12 @@
+# NOTE: the backend image is built with the REPO ROOT as context
+# (docker build -f apps/backend/Dockerfile .), where the root .dockerignore
+# governs the context. This file only applies if someone builds with
+# apps/backend as the context and exists as a safety net for that case.
+node_modules
+dist
+coverage
+.turbo
+*.log
+.env
+.env.*
+!.env.example

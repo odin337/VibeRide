@@ -1,0 +1,527 @@
+openapi: 3.1.0
+info:
+  title: VibeRide Backend API
+  version: 0.1.0
+  description: >-
+    REST API for VibeRide — auth (Telegram Mini App initData / guest), track registration,
+    anti-cheat validated score submission and per-track leaderboards. Request/response shapes
+    mirror the zod schemas in packages/shared/src/schemas/api.ts, which the backend uses for
+    validation at every boundary.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:3000
+    description: Local development
+tags:
+  - name: ops
+    description: Health probes and metrics
+  - name: auth
+    description: Session token issuance
+  - name: tracks
+    description: Track metadata registration
+  - name: scores
+    description: Score submission (anti-cheat validated)
+  - name: leaderboard
+    description: Per-track leaderboards
+
+paths:
+  /health:
+    get:
+      tags: [ops]
+      operationId: getHealth
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: ok
+
+  /health/ready:
+    get:
+      tags: [ops]
+      operationId: getReadiness
+      summary: Readiness probe
+      responses:
+        '200':
+          description: Ready to receive traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: ok
+        '503':
+          description: Dependencies unavailable — not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: error
+
+  /metrics:
+    get:
+      tags: [ops]
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: >-
+        Prometheus text exposition format. Not authenticated at the application level; restrict
+        exposure at the ingress/network layer in production.
+      responses:
+        '200':
+          description: Metrics in Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP http_requests_total Total HTTP requests
+                # TYPE http_requests_total counter
+                http_requests_total{method="POST",path="/api/scores",status="201"} 42
+
+  /api/auth/telegram:
+    post:
+      tags: [auth]
+      operationId: authTelegram
+      summary: Exchange Telegram Mini App initData for a session JWT
+      description: >-
+        Validates the HMAC-SHA-256 signature of the raw initData string using a key derived from
+        the bot token (server-side only) and checks auth_date freshness before trusting any
+        identity claims. Throttled to 10 requests per 60 s.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelegramAuthRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: initData signature invalid or auth_date expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/Throttled'
+
+  /api/auth/guest:
+    post:
+      tags: [auth]
+      operationId: authGuest
+      summary: Create or resume a guest session for a device UUID
+      description: Throttled to 10 requests per 60 s.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuestAuthRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/Throttled'
+
+  /api/tracks:
+    post:
+      tags: [tracks]
+      operationId: registerTrack
+      summary: Register track metadata for an audio hash
+      description: >-
+        Idempotent for identical payloads; conflicting metadata for an already-registered
+        audioHash is rejected with 409.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrackMetadata'
+      responses:
+        '201':
+          description: Track registered (or already registered with identical metadata)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrackMetadata'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: audioHash already registered with different metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/Throttled'
+
+  /api/tracks/{audioHash}:
+    get:
+      tags: [tracks]
+      operationId: getTrack
+      summary: Fetch registered metadata for a track
+      parameters:
+        - name: audioHash
+          in: path
+          required: true
+          description: Lowercase sha-256 hex digest of the original encoded audio bytes
+          schema:
+            $ref: '#/components/schemas/Sha256Hex'
+      responses:
+        '200':
+          description: Track metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrackMetadata'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          description: Unknown audioHash
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/Throttled'
+
+  /api/scores:
+    post:
+      tags: [scores]
+      operationId: submitScore
+      summary: Submit a run result (anti-cheat validated)
+      description: >-
+        Validation pipeline: zod schema -> seed derivation check
+        (seed === seedFromHash(audioHash)) -> deterministic level regeneration and
+        score <= maxScore -> checkpoint replay validation (tick alignment, monotonic score,
+        kinematic speed bounds, duration consistency). Any failed check rejects the submission
+        with 422. Throttled to 10 requests per 60 s.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScoreSubmission'
+      responses:
+        '201':
+          description: Score accepted and ranked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaderboardEntry'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: audioHash was never registered via POST /api/tracks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Rejected by anti-cheat validation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                statusCode: 422
+                message: score 99999 exceeds the level maxScore 1450 for this track
+                error: Unprocessable Entity
+        '429':
+          $ref: '#/components/responses/Throttled'
+
+  /api/leaderboard:
+    get:
+      tags: [leaderboard]
+      operationId: getLeaderboard
+      summary: Top scores for one track
+      parameters:
+        - name: audioHash
+          in: query
+          required: true
+          description: Lowercase sha-256 hex digest identifying the track
+          schema:
+            $ref: '#/components/schemas/Sha256Hex'
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of entries to return (coerced from string)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Leaderboard page (empty entries list for a track with no submissions)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaderboardPage'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/Throttled'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Session token issued by /api/auth/telegram or /api/auth/guest
+
+  responses:
+    ValidationError:
+      description: Request failed zod validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 400
+            message:
+              - 'audioHash: must be a lowercase sha-256 hex digest'
+            error: Bad Request
+    Unauthorized:
+      description: Missing, invalid or expired Bearer token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 401
+            message: Unauthorized
+            error: Unauthorized
+    Throttled:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            statusCode: 429
+            message: 'ThrottlerException: Too Many Requests'
+            error: Too Many Requests
+
+  schemas:
+    Sha256Hex:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+      description: Lowercase sha-256 hex digest (64 chars). Mirrors sha256HexSchema.
+      examples:
+        - 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, error]
+
+    ErrorResponse:
+      type: object
+      description: Standard NestJS error envelope
+      required: [statusCode, message]
+      properties:
+        statusCode:
+          type: integer
+        message:
+          description: Human-readable message, or one string per zod issue for 400s
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        error:
+          type: string
+          description: HTTP reason phrase
+
+    TelegramAuthRequest:
+      type: object
+      description: Mirrors telegramAuthRequestSchema
+      required: [initData]
+      properties:
+        initData:
+          type: string
+          minLength: 1
+          maxLength: 8192
+          description: Raw initData query string as provided by the Telegram Mini Apps SDK
+
+    GuestAuthRequest:
+      type: object
+      description: Mirrors guestAuthRequestSchema
+      required: [deviceId, displayName]
+      properties:
+        deviceId:
+          type: string
+          format: uuid
+          description: Client-generated stable device UUID
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Trimmed display name shown on leaderboards
+
+    AuthResponse:
+      type: object
+      required: [token, player]
+      properties:
+        token:
+          type: string
+          description: Signed JWT for the Authorization header
+        player:
+          type: object
+          required: [id, displayName, kind]
+          properties:
+            id:
+              type: string
+              description: Stable player id ("tg:<userId>" or "guest:<deviceId>")
+            displayName:
+              type: string
+            kind:
+              type: string
+              enum: [telegram, guest]
+
+    TrackMetadata:
+      type: object
+      description: Mirrors trackMetadataSchema
+      required: [audioHash, title, durationSec, bpm]
+      properties:
+        audioHash:
+          $ref: '#/components/schemas/Sha256Hex'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        durationSec:
+          type: number
+          exclusiveMinimum: 0
+        bpm:
+          type: number
+          minimum: 40
+          maximum: 300
+
+    ReplayCheckpoint:
+      type: object
+      description: >-
+        Mirrors replayCheckpointSchema. Recorded every CHECKPOINT_INTERVAL_TICKS (120) simulation
+        ticks (2 s at 60 Hz).
+      required: [tick, x, y, score]
+      properties:
+        tick:
+          type: integer
+          minimum: 0
+          description: Fixed-step simulation tick (SIM_TICK_HZ = 60 per second)
+        x:
+          type: number
+          description: Player X position, metres
+        y:
+          type: number
+          description: Player Y position, metres
+        score:
+          type: integer
+          minimum: 0
+          description: Accumulated score at this tick
+
+    ScoreSubmission:
+      type: object
+      description: Mirrors scoreSubmissionSchema (the wire form of RunResult)
+      required:
+        - audioHash
+        - seed
+        - score
+        - distanceM
+        - finished
+        - durationMs
+        - collectiblesTaken
+        - checkpoints
+      properties:
+        audioHash:
+          $ref: '#/components/schemas/Sha256Hex'
+        seed:
+          type: integer
+          description: Level seed; must equal seedFromHash(audioHash)
+        score:
+          type: integer
+          minimum: 0
+        distanceM:
+          type: number
+          minimum: 0
+        finished:
+          type: boolean
+        durationMs:
+          type: integer
+          exclusiveMinimum: 0
+          description: Wall-clock duration of the run, milliseconds
+        collectiblesTaken:
+          type: integer
+          minimum: 0
+        checkpoints:
+          type: array
+          minItems: 1
+          maxItems: 600
+          items:
+            $ref: '#/components/schemas/ReplayCheckpoint'
+
+    LeaderboardEntry:
+      type: object
+      required: [rank, playerId, displayName, score, audioHash, achievedAt]
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+        playerId:
+          type: string
+        displayName:
+          type: string
+        score:
+          type: integer
+          minimum: 0
+        audioHash:
+          $ref: '#/components/schemas/Sha256Hex'
+        achievedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp
+
+    LeaderboardPage:
+      type: object
+      required: [audioHash, entries, total]
+      properties:
+        audioHash:
+          $ref: '#/components/schemas/Sha256Hex'
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeaderboardEntry'
+        total:
+          type: integer
+          minimum: 0
+          description: Total submissions for this track (may exceed entries.length)

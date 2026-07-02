@@ -1,0 +1,6 @@
+{
+  "_comment": "TODO(manual): replace every viberide.example.com URL with the real production domain, then serve this file publicly at https://<domain>/tonconnect-manifest.json and point TonModuleConfig.manifestUrl at it. Wallets fetch this manifest directly, so it must be reachable without authentication.",
+  "url": "https://viberide.example.com",
+  "name": "VibeRide",
+  "iconUrl": "https://viberide.example.com/icons/icon-180.png"
+}

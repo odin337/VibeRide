@@ -1,0 +1,14 @@
+# NOTE: the web-game image is built with the REPO ROOT as context
+# (docker build -f apps/web-game/Dockerfile .), where the root .dockerignore
+# governs the context. This file only applies if someone builds with
+# apps/web-game as the context and exists as a safety net for that case.
+node_modules
+dist
+coverage
+playwright-report
+test-results
+.turbo
+*.log
+.env
+.env.*
+!.env.example

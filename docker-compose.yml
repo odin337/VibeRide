@@ -1,0 +1,110 @@
+# VibeRide — local/dev stack. Builds all three images from source:
+#   docker compose up --build
+# Variables like ${VITE_API_BASE_URL} are interpolated from ./.env
+# (see .env.example). Staging/production hosts add the overlay that pulls
+# prebuilt GHCR images instead of building — see docker-compose.staging.yml.
+name: viberide
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    # Real secrets (JWT_SECRET, TELEGRAM_BOT_TOKEN, ...) live here for local dev.
+    # required: false so the staging overlay can inject them via environment
+    # instead of a checked-out file.
+    env_file:
+      - path: ./apps/backend/.env
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+    ports:
+      - '3000:3000'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - core
+
+  web-game:
+    build:
+      context: .
+      dockerfile: apps/web-game/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000}
+        VITE_FEATURE_TON: ${VITE_FEATURE_TON:-false}
+        VITE_FEATURE_NFT_SKINS: ${VITE_FEATURE_NFT_SKINS:-false}
+        VITE_FEATURE_LEADERBOARD: ${VITE_FEATURE_LEADERBOARD:-true}
+        VITE_FEATURE_TELEGRAM: 'false'
+        VITE_TONCONNECT_MANIFEST_URL: ${VITE_TONCONNECT_MANIFEST_URL:-}
+    environment:
+      # Appended to the CSP connect-src of nginx (rendered at container start).
+      CSP_CONNECT_SRC: ${CSP_CONNECT_SRC:-http://localhost:3000}
+    ports:
+      - '8080:8080'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      # nginx-unprivileged keeps its pid file and temp paths under /tmp;
+      # the envsubst entrypoint renders templates into /etc/nginx/conf.d.
+      - /tmp
+      - /etc/nginx/conf.d
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - edge
+
+  telegram-adapter:
+    build:
+      context: .
+      dockerfile: apps/telegram-adapter/Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:3000}
+        VITE_FEATURE_TON: ${VITE_FEATURE_TON:-false}
+        VITE_FEATURE_NFT_SKINS: ${VITE_FEATURE_NFT_SKINS:-false}
+        VITE_FEATURE_LEADERBOARD: ${VITE_FEATURE_LEADERBOARD:-true}
+        VITE_FEATURE_TELEGRAM: 'true'
+        VITE_TONCONNECT_MANIFEST_URL: ${VITE_TONCONNECT_MANIFEST_URL:-}
+    environment:
+      CSP_CONNECT_SRC: ${CSP_CONNECT_SRC:-http://localhost:3000}
+    ports:
+      - '8081:8080'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /etc/nginx/conf.d
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - edge
+
+# The static frontends never talk to the backend server-side (the browser
+# does), so they live on an isolated network segment of their own.
+networks:
+  core:
+    driver: bridge
+  edge:
+    driver: bridge

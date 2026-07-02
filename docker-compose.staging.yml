@@ -1,0 +1,31 @@
+# Staging/production overlay: pull prebuilt images from GHCR instead of building.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build
+#
+# Required in the host-side .env next to this file (see .env.example):
+#   IMAGE_PREFIX  — lowercase <github_owner>/<repo>, e.g. acme/viberide
+#   TAG           — git SHA published by CI (PREVIOUS_TAG is maintained by the
+#                   deploy workflow for automatic rollback)
+#   JWT_SECRET, TELEGRAM_BOT_TOKEN — backend secrets
+# TODO(manual): provision the host .env once (never commit it) and run
+# `docker login ghcr.io` with a read:packages token on the host.
+services:
+  backend:
+    image: ghcr.io/${IMAGE_PREFIX:?set IMAGE_PREFIX in .env (lowercase owner/repo)}/backend:${TAG:-latest}
+    pull_policy: always
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in the host .env}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+
+  web-game:
+    image: ghcr.io/${IMAGE_PREFIX:?set IMAGE_PREFIX in .env (lowercase owner/repo)}/web-game:${TAG:-latest}
+    pull_policy: always
+    environment:
+      CSP_CONNECT_SRC: ${CSP_CONNECT_SRC:-}
+
+  telegram-adapter:
+    image: ghcr.io/${IMAGE_PREFIX:?set IMAGE_PREFIX in .env (lowercase owner/repo)}/telegram-adapter:${TAG:-latest}
+    pull_policy: always
+    environment:
+      CSP_CONNECT_SRC: ${CSP_CONNECT_SRC:-}

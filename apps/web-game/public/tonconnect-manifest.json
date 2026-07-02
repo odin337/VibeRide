@@ -1,0 +1,6 @@
+{
+  "_comment": "TODO(manual): replace every viberide.example.com URL with the real production domain. Wallets fetch this manifest directly, so it must be served publicly (no auth) and VITE_TONCONNECT_MANIFEST_URL must point at its final URL.",
+  "url": "https://viberide.example.com",
+  "name": "VibeRide",
+  "iconUrl": "https://viberide.example.com/icons/icon-180.png"
+}

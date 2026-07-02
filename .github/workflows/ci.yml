@@ -1,0 +1,269 @@
+# VibeRide CI/CD — quality gates, tests, e2e, security scanning, container images,
+# and automatic staging deploy (main branch only, guarded by staging secrets).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint, format, typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm version is read from "packageManager" in the root package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm format
+      # turbo typecheck depends on ^build, so workspace deps are built first.
+      - run: pnpm typecheck
+
+  test:
+    name: Unit tests + coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # turbo test depends on ^build, so workspace deps are built first.
+      - run: pnpm test
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            packages/*/coverage
+            apps/*/coverage
+          if-no-files-found: ignore
+          retention-days: 7
+
+  e2e:
+    name: Playwright e2e (web-game)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Install Playwright browsers
+        working-directory: apps/web-game
+        run: npx playwright install --with-deps chromium
+      - name: Run e2e tests
+        working-directory: apps/web-game
+        run: pnpm test:e2e
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web-game/playwright-report
+          if-no-files-found: ignore
+          retention-days: 7
+
+  security:
+    name: Dependency audit + secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans the full git history, not just the checkout.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # pnpm audit works from the lockfile alone — no install needed.
+      - run: pnpm audit:deps
+      - name: Gitleaks secret scan
+        # continue-on-error is deliberately NOT set: leaked secrets must fail CI.
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # TODO(manual): organisation-owned repos need a (free for OSS) license key:
+          # set the GITLEAKS_LICENSE secret, see gitleaks/gitleaks-action docs.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  docker:
+    name: Build, scan and publish images
+    needs: [quality, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute image prefix (GHCR requires lowercase)
+        run: echo "IMAGE_PREFIX=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - name: Build backend image
+        run: |
+          docker build -f apps/backend/Dockerfile \
+            -t "$IMAGE_PREFIX/backend:$GITHUB_SHA" .
+      # TODO(manual): set the STAGING_API_BASE_URL and STAGING_CSP_CONNECT_SRC
+      # repository *variables* (Settings → Secrets and variables → Actions →
+      # Variables) once the staging domain exists. Empty means same-origin API.
+      - name: Build web-game image
+        run: |
+          docker build -f apps/web-game/Dockerfile \
+            --build-arg VITE_API_BASE_URL="${{ vars.STAGING_API_BASE_URL || '' }}" \
+            --build-arg VITE_FEATURE_TON=false \
+            --build-arg VITE_FEATURE_NFT_SKINS=false \
+            --build-arg VITE_FEATURE_LEADERBOARD=true \
+            --build-arg VITE_FEATURE_TELEGRAM=false \
+            --build-arg CSP_CONNECT_SRC="${{ vars.STAGING_CSP_CONNECT_SRC || '' }}" \
+            -t "$IMAGE_PREFIX/web-game:$GITHUB_SHA" .
+      - name: Build telegram-adapter image
+        run: |
+          docker build -f apps/telegram-adapter/Dockerfile \
+            --build-arg VITE_API_BASE_URL="${{ vars.STAGING_API_BASE_URL || '' }}" \
+            --build-arg VITE_FEATURE_TON=false \
+            --build-arg VITE_FEATURE_NFT_SKINS=false \
+            --build-arg VITE_FEATURE_LEADERBOARD=true \
+            --build-arg VITE_FEATURE_TELEGRAM=true \
+            --build-arg CSP_CONNECT_SRC="${{ vars.STAGING_CSP_CONNECT_SRC || '' }}" \
+            -t "$IMAGE_PREFIX/telegram-adapter:$GITHUB_SHA" .
+      # trivy-action has no floating major tag — pinned to an exact release.
+      - name: Trivy scan — backend
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_PREFIX }}/backend:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Trivy scan — web-game
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_PREFIX }}/web-game:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Trivy scan — telegram-adapter
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_PREFIX }}/telegram-adapter:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push images (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          for image in backend web-game telegram-adapter; do
+            docker tag "$IMAGE_PREFIX/$image:$GITHUB_SHA" "$IMAGE_PREFIX/$image:latest"
+            docker push "$IMAGE_PREFIX/$image:$GITHUB_SHA"
+            docker push "$IMAGE_PREFIX/$image:latest"
+          done
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: [docker, e2e, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging
+    steps:
+      # TODO(manual): configure the staging host and the following secrets on the
+      # "staging" environment: STAGING_SSH_HOST, STAGING_SSH_USER, STAGING_SSH_KEY.
+      # Host prerequisites (one-time provisioning):
+      #   - /opt/viberide contains docker-compose.yml, docker-compose.staging.yml,
+      #     apps/backend/.env (real secrets) and .env with at least
+      #     IMAGE_PREFIX=<lowercase owner/repo> (see .env.example).
+      #   - `docker login ghcr.io` was run with a read:packages token.
+      # Every step below is a no-op until STAGING_SSH_HOST is set, so CI stays
+      # green on forks and before the host exists.
+      - name: Deploy new tag (records previous tag for rollback)
+        if: ${{ secrets.STAGING_SSH_HOST != '' }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_TAG: ${{ github.sha }}
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: DEPLOY_TAG
+          script: |
+            set -euo pipefail
+            cd /opt/viberide
+            touch .env
+            # Remember what is currently live so the rollback step can restore it.
+            CURRENT_TAG=$(grep -E '^TAG=' .env | tail -n 1 | cut -d= -f2- || true)
+            grep -vE '^(TAG|PREVIOUS_TAG)=' .env > .env.next || true
+            if [ -n "${CURRENT_TAG}" ]; then
+              echo "PREVIOUS_TAG=${CURRENT_TAG}" >> .env.next
+            fi
+            echo "TAG=${DEPLOY_TAG}" >> .env.next
+            mv .env.next .env
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build --remove-orphans
+      - name: Health check
+        if: ${{ secrets.STAGING_SSH_HOST != '' }}
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            for attempt in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+                echo "Backend healthy after ${attempt} attempt(s)."
+                exit 0
+              fi
+              echo "Attempt ${attempt}/30 — backend not healthy yet, retrying in 5s..."
+              sleep 5
+            done
+            echo "Backend failed to become healthy — triggering rollback."
+            exit 1
+      - name: Automatic rollback to previous tag
+        if: ${{ failure() && secrets.STAGING_SSH_HOST != '' }}
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/viberide
+            PREVIOUS_TAG=$(grep -E '^PREVIOUS_TAG=' .env | tail -n 1 | cut -d= -f2- || true)
+            if [ -z "${PREVIOUS_TAG}" ]; then
+              echo "No previous tag recorded — nothing to roll back to."
+              exit 1
+            fi
+            sed -i "s|^TAG=.*|TAG=${PREVIOUS_TAG}|" .env
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build --remove-orphans
+            echo "Rolled back staging to ${PREVIOUS_TAG}."

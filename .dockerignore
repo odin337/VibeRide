@@ -1,0 +1,28 @@
+# Applies to every image built with the repo root as context
+# (all three Dockerfiles under apps/*). Keeps images small and,
+# critically, keeps local secrets and artefacts out of the build context.
+.git
+.github
+.vscode
+.claude
+.turbo
+**/.turbo
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/playwright-report
+**/test-results
+**/*.log
+docs
+infra
+docker-compose*.yml
+README.md
+**/README.md
+
+# Secrets never enter a build context. .env.example files stay available.
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example

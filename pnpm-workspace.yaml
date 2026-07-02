@@ -1,0 +1,15 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+onlyBuiltDependencies:
+  - esbuild
+  - '@swc/core'
+  - '@nestjs/core'
+  - unrs-resolver
+
+overrides:
+  # @telegram-apps/sdk pins valibot@1.0.0, which carries a ReDoS advisory
+  # (GHSA-vqpr-j7v3-hqw9); the patch lives in the same major, so forcing
+  # >=1.2.0 is API-compatible. Re-check on every @telegram-apps/sdk bump.
+  valibot: ^1.2.0

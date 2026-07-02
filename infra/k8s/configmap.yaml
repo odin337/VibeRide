@@ -1,0 +1,26 @@
+# Non-secret runtime configuration. Secrets (JWT_SECRET, TELEGRAM_BOT_TOKEN)
+# live in the viberide-secrets Secret — see secret.example.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: viberide-config
+  namespace: viberide
+  labels:
+    app.kubernetes.io/name: viberide
+data:
+  NODE_ENV: production
+  PORT: '3000'
+  # Feature flags — resolveFeatureFlags() from @viberide/shared accepts the
+  # plain FEATURE_* names on the server side.
+  FEATURE_TON: 'false'
+  FEATURE_NFT_SKINS: 'false'
+  FEATURE_LEADERBOARD: 'true'
+  FEATURE_TELEGRAM: 'true'
+  # TODO(manual): browser-facing origins allowed to call the API (CORS),
+  # comma-separated — must match the ingress hosts.
+  CORS_ORIGIN: 'https://viberide.example.com,https://tg.viberide.example.com'
+  # Extra origins appended to the frontends' CSP connect-src (nginx template).
+  # TODO(manual): set to the real API origin; for TON builds also append e.g.
+  # "https://tonapi.io https://bridge.tonapi.io wss://bridge.tonapi.io".
+  CSP_CONNECT_SRC_WEB: 'https://api.viberide.example.com'
+  CSP_CONNECT_SRC_TG: 'https://api.viberide.example.com'

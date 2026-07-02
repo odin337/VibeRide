@@ -1,0 +1,35 @@
+{
+  "name": "viberide",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VibeRide — music-driven racing game (Hill Climb Racing × Piano Tiles × Geometry Dash) as a web game and Telegram Mini App with TON integration",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10.34.4",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:e2e": "turbo run test:e2e",
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "eslint . --max-warnings 0 --fix",
+    "format": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "audit:deps": "pnpm audit --audit-level=high",
+    "ci": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.0",
+    "eslint": "^9.30.0",
+    "eslint-config-prettier": "^10.1.5",
+    "eslint-plugin-security": "^3.0.1",
+    "prettier": "^3.5.3",
+    "turbo": "^2.5.4",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.35.0"
+  }
+}

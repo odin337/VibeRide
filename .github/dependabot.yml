@@ -1,0 +1,31 @@
+# Weekly dependency updates, grouped to keep PR noise low.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+    open-pull-requests-limit: 10
+    groups:
+      # All minor/patch bumps across the workspace land as a single PR.
+      npm-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+    # Major bumps stay individual PRs so breaking changes are reviewed one by one.
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - '*'

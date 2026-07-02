@@ -1,0 +1,12 @@
+# NOTE: the telegram-adapter image is built with the REPO ROOT as context
+# (docker build -f apps/telegram-adapter/Dockerfile .), where the root
+# .dockerignore governs the context. This file only applies if someone builds
+# with apps/telegram-adapter as the context and exists as a safety net.
+node_modules
+dist
+coverage
+.turbo
+*.log
+.env
+.env.*
+!.env.example

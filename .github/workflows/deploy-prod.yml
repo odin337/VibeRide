@@ -1,0 +1,143 @@
+# Manual production deploy / rollback.
+#
+# Deploy:   Actions → "Deploy production" → Run workflow → tag=<git sha from a
+#           green main build>, leave previous_tag empty.
+# Rollback: Run workflow with previous_tag=<tag to restore> (tag is ignored;
+#           GitHub requires it, pass the same value).
+#
+# The "production" environment must be configured with required reviewers so
+# every run needs manual approval.
+# TODO(manual): create the "production" environment (Settings → Environments),
+# add required reviewers, and set PROD_SSH_HOST / PROD_SSH_USER / PROD_SSH_KEY
+# secrets on it. Provision /opt/viberide on the host exactly like staging
+# (compose files + .env with IMAGE_PREFIX + apps/backend/.env with secrets).
+name: Deploy production
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to deploy (git SHA of a green main build)'
+        required: true
+        type: string
+      previous_tag:
+        description: 'ROLLBACK MODE: when set, this tag is redeployed instead of "tag"'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.tag }}
+    if: inputs.previous_tag == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Deploy new tag (records previous tag for rollback)
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_TAG: ${{ inputs.tag }}
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          envs: DEPLOY_TAG
+          script: |
+            set -euo pipefail
+            cd /opt/viberide
+            touch .env
+            CURRENT_TAG=$(grep -E '^TAG=' .env | tail -n 1 | cut -d= -f2- || true)
+            grep -vE '^(TAG|PREVIOUS_TAG)=' .env > .env.next || true
+            if [ -n "${CURRENT_TAG}" ]; then
+              echo "PREVIOUS_TAG=${CURRENT_TAG}" >> .env.next
+            fi
+            echo "TAG=${DEPLOY_TAG}" >> .env.next
+            mv .env.next .env
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build --remove-orphans
+      - name: Health check
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            for attempt in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+                echo "Backend healthy after ${attempt} attempt(s)."
+                exit 0
+              fi
+              echo "Attempt ${attempt}/30 — backend not healthy yet, retrying in 5s..."
+              sleep 5
+            done
+            echo "Backend failed to become healthy — triggering rollback."
+            exit 1
+      - name: Automatic rollback to previous tag
+        if: failure()
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/viberide
+            PREVIOUS_TAG=$(grep -E '^PREVIOUS_TAG=' .env | tail -n 1 | cut -d= -f2- || true)
+            if [ -z "${PREVIOUS_TAG}" ]; then
+              echo "No previous tag recorded — nothing to roll back to."
+              exit 1
+            fi
+            sed -i "s|^TAG=.*|TAG=${PREVIOUS_TAG}|" .env
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build --remove-orphans
+            echo "Rolled back production to ${PREVIOUS_TAG}."
+
+  rollback:
+    name: Rollback to ${{ inputs.previous_tag }}
+    if: inputs.previous_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Redeploy previous tag
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          ROLLBACK_TAG: ${{ inputs.previous_tag }}
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          envs: ROLLBACK_TAG
+          script: |
+            set -euo pipefail
+            cd /opt/viberide
+            touch .env
+            grep -vE '^TAG=' .env > .env.next || true
+            echo "TAG=${ROLLBACK_TAG}" >> .env.next
+            mv .env.next .env
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build --remove-orphans
+      - name: Health check
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            for attempt in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:3000/health > /dev/null; then
+                echo "Backend healthy after ${attempt} attempt(s)."
+                exit 0
+              fi
+              echo "Attempt ${attempt}/30 — backend not healthy yet, retrying in 5s..."
+              sleep 5
+            done
+            echo "Backend failed to become healthy after rollback — manual intervention required."
+            exit 1

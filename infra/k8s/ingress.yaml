@@ -1,0 +1,56 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: viberide
+  namespace: viberide
+  labels:
+    app.kubernetes.io/name: viberide
+  annotations:
+    # TODO(manual): create the ClusterIssuer (cert-manager) named below, or
+    # change the annotation to an issuer that exists in your cluster.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: 'true'
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        # TODO(manual): replace every viberide.example.com host below with the
+        # real domains once DNS exists (keep the three-host split).
+        - viberide.example.com
+        - api.viberide.example.com
+        - tg.viberide.example.com
+      secretName: viberide-tls
+  rules:
+    # Plain web game.
+    - host: viberide.example.com # TODO(manual): real web host
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-game
+                port:
+                  name: http
+    # Backend API.
+    - host: api.viberide.example.com # TODO(manual): real API host
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  name: http
+    # Telegram Mini App (register this URL with @BotFather).
+    - host: tg.viberide.example.com # TODO(manual): real TWA host
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: telegram-adapter
+                port:
+                  name: http
