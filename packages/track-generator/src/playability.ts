@@ -1,4 +1,4 @@
-import { FINISH_SCORE, HEIGHTFIELD_STEP_M } from '@viberide/shared';
+import { FINISH_SCORE, HEIGHTFIELD_STEP_M, SCORE_CEILING_FACTOR } from '@viberide/shared';
 import type { LevelDefinition, Obstacle, TrackPoint } from '@viberide/shared';
 
 import { FINISH_CLEARANCE_M, OBSTACLE_MIN_X_M } from './obstacles';
@@ -122,12 +122,15 @@ function checkCollectibles(level: LevelDefinition, issues: string[]): void {
 }
 
 function checkScore(level: LevelDefinition, issues: string[]): void {
+  // Theoretical ceiling: every pickup at max combo during fever.
   const expected =
-    level.collectibles.reduce((sum, collectible) => sum + collectible.score, 0) + FINISH_SCORE;
+    level.collectibles.reduce((sum, collectible) => sum + collectible.score, 0) *
+      SCORE_CEILING_FACTOR +
+    FINISH_SCORE;
   if (level.maxScore !== expected) {
     issues.push(
-      `maxScore ${level.maxScore} does not equal collectible scores + FINISH_SCORE ` +
-        `(${expected})`,
+      `maxScore ${level.maxScore} does not equal collectible scores × SCORE_CEILING_FACTOR ` +
+        `+ FINISH_SCORE (${expected})`,
     );
   }
 }
@@ -142,7 +145,8 @@ function checkScore(level: LevelDefinition, issues: string[]): void {
  *   the finish beyond the last obstacle), jump-recovery spacing kept;
  * - every collectible strictly above the terrain, within jump reach,
  *   and not overlapping any obstacle;
- * - maxScore equals the sum of collectible scores plus FINISH_SCORE.
+ * - maxScore equals the collectible score sum × SCORE_CEILING_FACTOR
+ *   (max combo during fever) plus FINISH_SCORE.
  *
  * Levels produced by generateLevel always pass; the backend also runs
  * this on regenerated levels as an anti-cheat sanity check.

@@ -1,14 +1,31 @@
 import { noopLogger } from '@viberide/shared';
 import type { GameEventBus, Logger, Unsubscribe } from '@viberide/shared';
 
-import { BOOST_DRONE, collectNoteHz, COLLECT_PLUCK, CRASH_BURST, JUMP_BLIP } from './notes';
+import { nextGridTimeSec } from './grid';
+import type { PlaybackSync } from './playback';
+import {
+  BOOST_DRONE,
+  collectNoteHz,
+  COLLECT_PLUCK,
+  CRASH_BURST,
+  JUMP_BLIP,
+  LAND_THUMP,
+  MISS_SCRATCH,
+  SFX_GRID_SUBDIVISIONS,
+} from './notes';
+import type { BlipSpec } from './notes';
 
 /**
  * Synthesized one-shot SFX glue (coverage-excluded — see vitest.config.ts).
- * Subscribes to the bus: jump → rising blip, collect → pentatonic pluck
- * cycling C-D-E-G-A, crash → noise burst; boost is a filtered saw drone
- * driven per-frame by setBoostActive. Note selection and envelope data
- * are pure and live in notes.ts.
+ *
+ * Shares the playback AudioContext through PlaybackSync, so every one-shot
+ * can be QUANTIZED onto the track's sixteenth grid: jump, landing, note
+ * plucks and misses all land on the music, never between it. Note pitch
+ * cycles a pentatonic and jumps an octave on long combos — the rider is
+ * literally playing the melody (Piano-Tiles).
+ *
+ * When the shared context is unavailable the sounds simply fire
+ * immediately on a local context (silent-ride degradation).
  */
 
 export interface SfxPort {
@@ -18,24 +35,30 @@ export interface SfxPort {
   dispose(): void;
 }
 
-export function createSfx(bus: GameEventBus, logger: Logger = noopLogger): SfxPort {
-  let context: AudioContext | null = null;
-  let masterGain: GainNode | null = null;
+export function createSfx(
+  bus: GameEventBus,
+  sync: PlaybackSync | null = null,
+  logger: Logger = noopLogger,
+): SfxPort {
+  let localContext: AudioContext | null = null;
+  const gainByContext = new Map<AudioContext, GainNode>();
   let boostNodes: { osc: OscillatorNode; gain: GainNode } | null = null;
   let pickupCount = 0;
+  let combo = 0;
   let volume = 0.8;
   const subscriptions: Unsubscribe[] = [];
 
   function ensureContext(): AudioContext | null {
-    if (context) {
-      return context;
+    const shared = sync?.ensureContext() ?? null;
+    if (shared) {
+      return shared;
+    }
+    if (localContext) {
+      return localContext;
     }
     try {
-      context = new AudioContext();
-      masterGain = context.createGain();
-      masterGain.gain.value = volume;
-      masterGain.connect(context.destination);
-      return context;
+      localContext = new AudioContext();
+      return localContext;
     } catch (error) {
       logger.warn('sfx AudioContext unavailable', {
         reason: error instanceof Error ? error.message : String(error),
@@ -44,49 +67,79 @@ export function createSfx(bus: GameEventBus, logger: Logger = noopLogger): SfxPo
     }
   }
 
-  function playBlip(): void {
+  /** Per-context SFX bus (bypasses the music filter/duck chain). */
+  function busGain(ctx: AudioContext): GainNode {
+    const existing = gainByContext.get(ctx);
+    if (existing) {
+      return existing;
+    }
+    const gain = ctx.createGain();
+    gain.gain.value = volume;
+    gain.connect(ctx.destination);
+    gainByContext.set(ctx, gain);
+    return gain;
+  }
+
+  /**
+   * Context time the next one-shot should start at: the next sixteenth of
+   * the active transport, or "now" when nothing is playing.
+   */
+  function quantizedStart(ctx: AudioContext): number {
+    const transport = sync?.transport() ?? null;
+    const now = ctx.currentTime;
+    if (!transport) {
+      return now;
+    }
+    const position = now - transport.startedAtCtxSec;
+    const gridPosition = nextGridTimeSec(position, transport.bpm, SFX_GRID_SUBDIVISIONS);
+    return transport.startedAtCtxSec + gridPosition;
+  }
+
+  function playBlip(spec: BlipSpec, frequencyScale = 1): void {
     const ctx = ensureContext();
-    if (!ctx || !masterGain) {
+    if (!ctx) {
       return;
     }
-    const now = ctx.currentTime;
+    const at = quantizedStart(ctx);
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'square';
-    osc.frequency.setValueAtTime(JUMP_BLIP.startHz, now);
-    osc.frequency.exponentialRampToValueAtTime(JUMP_BLIP.endHz, now + JUMP_BLIP.durationSec);
-    gain.gain.setValueAtTime(JUMP_BLIP.peakGain, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + JUMP_BLIP.durationSec);
+    osc.frequency.setValueAtTime(spec.startHz * frequencyScale, at);
+    osc.frequency.exponentialRampToValueAtTime(spec.endHz * frequencyScale, at + spec.durationSec);
+    gain.gain.setValueAtTime(spec.peakGain, at);
+    gain.gain.exponentialRampToValueAtTime(0.001, at + spec.durationSec);
     osc.connect(gain);
-    gain.connect(masterGain);
-    osc.start(now);
-    osc.stop(now + JUMP_BLIP.durationSec + 0.02);
+    gain.connect(busGain(ctx));
+    osc.start(at);
+    osc.stop(at + spec.durationSec + 0.02);
   }
 
   function playPluck(): void {
     const ctx = ensureContext();
-    if (!ctx || !masterGain) {
+    if (!ctx) {
       return;
     }
-    const now = ctx.currentTime;
+    const at = quantizedStart(ctx);
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'triangle';
-    osc.frequency.value = collectNoteHz(pickupCount);
+    osc.frequency.value = collectNoteHz(pickupCount, combo);
     pickupCount += 1;
-    gain.gain.setValueAtTime(COLLECT_PLUCK.peakGain, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + COLLECT_PLUCK.durationSec);
+    gain.gain.setValueAtTime(COLLECT_PLUCK.peakGain, at);
+    gain.gain.exponentialRampToValueAtTime(0.001, at + COLLECT_PLUCK.durationSec);
     osc.connect(gain);
-    gain.connect(masterGain);
-    osc.start(now);
-    osc.stop(now + COLLECT_PLUCK.durationSec + 0.02);
+    gain.connect(busGain(ctx));
+    osc.start(at);
+    osc.stop(at + COLLECT_PLUCK.durationSec + 0.02);
   }
 
   function playCrash(): void {
     const ctx = ensureContext();
-    if (!ctx || !masterGain) {
+    if (!ctx) {
       return;
     }
+    // Crashes are NOT quantized: the impact is immediate; the music layer
+    // provides the rhythmic stutter (playback.endRun).
     const now = ctx.currentTime;
     const length = Math.floor(ctx.sampleRate * CRASH_BURST.durationSec);
     const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
@@ -102,13 +155,13 @@ export function createSfx(bus: GameEventBus, logger: Logger = noopLogger): SfxPo
     gain.gain.setValueAtTime(CRASH_BURST.peakGain, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + CRASH_BURST.durationSec);
     noise.connect(gain);
-    gain.connect(masterGain);
+    gain.connect(busGain(ctx));
     noise.start(now);
   }
 
   function startBoostDrone(): void {
     const ctx = ensureContext();
-    if (!ctx || !masterGain || boostNodes) {
+    if (!ctx || boostNodes) {
       return;
     }
     const osc = ctx.createOscillator();
@@ -119,9 +172,22 @@ export function createSfx(bus: GameEventBus, logger: Logger = noopLogger): SfxPo
     filter.type = 'lowpass';
     filter.frequency.value = BOOST_DRONE.filterHz;
     gain.gain.value = BOOST_DRONE.gain;
+    // Pulse the drone on the beat when a transport is running — fever
+    // breathes with the track instead of droning flat.
+    const transport = sync?.transport() ?? null;
+    if (transport) {
+      const lfo = ctx.createOscillator();
+      const depth = ctx.createGain();
+      lfo.frequency.value = transport.bpm / 60;
+      depth.gain.value = BOOST_DRONE.gain * 0.5;
+      lfo.connect(depth);
+      depth.connect(gain.gain);
+      lfo.start(quantizedStart(ctx));
+      lfo.stop(ctx.currentTime + 30);
+    }
     osc.connect(filter);
     filter.connect(gain);
-    gain.connect(masterGain);
+    gain.connect(busGain(ctx));
     osc.start();
     boostNodes = { osc, gain };
   }
@@ -143,14 +209,27 @@ export function createSfx(bus: GameEventBus, logger: Logger = noopLogger): SfxPo
   subscriptions.push(
     bus.on('game:action', ({ action }) => {
       if (action === 'jump') {
-        playBlip();
+        playBlip(JUMP_BLIP);
       }
     }),
+    bus.on('game:landed', () => {
+      playBlip(LAND_THUMP);
+    }),
     bus.on('game:collect', () => {
+      combo += 1;
       playPluck();
     }),
+    bus.on('game:noteMiss', () => {
+      combo = 0;
+      playBlip(MISS_SCRATCH);
+    }),
     bus.on('game:collision', () => {
+      combo = 0;
       playCrash();
+    }),
+    bus.on('game:started', () => {
+      combo = 0;
+      pickupCount = 0;
     }),
   );
 
@@ -165,8 +244,8 @@ export function createSfx(bus: GameEventBus, logger: Logger = noopLogger): SfxPo
 
     setVolume(nextVolume: number): void {
       volume = Math.min(1, Math.max(0, nextVolume));
-      if (masterGain) {
-        masterGain.gain.value = volume;
+      for (const gain of gainByContext.values()) {
+        gain.gain.value = volume;
       }
     },
 
@@ -175,10 +254,13 @@ export function createSfx(bus: GameEventBus, logger: Logger = noopLogger): SfxPo
         unsubscribe();
       }
       stopBoostDrone();
-      if (context) {
-        void context.close().catch(() => undefined);
-        context = null;
-        masterGain = null;
+      for (const gain of gainByContext.values()) {
+        gain.disconnect();
+      }
+      gainByContext.clear();
+      if (localContext) {
+        void localContext.close().catch(() => undefined);
+        localContext = null;
       }
     },
   };

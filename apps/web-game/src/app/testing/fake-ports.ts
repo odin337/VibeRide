@@ -18,19 +18,50 @@ import type { GameControllerPorts, RendererHandle } from '../ports';
 export interface RecordingPlayback extends PlaybackPort {
   readonly calls: string[];
   volume: number;
+  /** What getPositionSec() returns; null = audio clock unavailable. */
+  positionSec: number | null;
+  airborne: boolean;
+  fever: boolean;
+  intensity: number;
+  duckCount: number;
 }
 
 export function makeRecordingPlayback(): RecordingPlayback {
   const playback: RecordingPlayback = {
     calls: [],
     volume: -1,
+    positionSec: null,
+    airborne: false,
+    fever: false,
+    intensity: 0,
+    duckCount: 0,
+    sync: {
+      ensureContext: (): AudioContext | null => null,
+      transport: (): { startedAtCtxSec: number; bpm: number } | null => null,
+    },
     startTrack: (): Promise<void> => {
       playback.calls.push('startTrack');
       return Promise.resolve();
     },
-    startDemo: (): Promise<void> => {
-      playback.calls.push('startDemo');
+    startPattern: (): Promise<void> => {
+      playback.calls.push('startPattern');
       return Promise.resolve();
+    },
+    getPositionSec: (): number | null => playback.positionSec,
+    setAirborne: (airborne: boolean): void => {
+      playback.airborne = airborne;
+    },
+    setFever: (fever: boolean): void => {
+      playback.fever = fever;
+    },
+    setIntensity: (level: number): void => {
+      playback.intensity = level;
+    },
+    duckMiss: (): void => {
+      playback.duckCount += 1;
+    },
+    endRun: (kind): void => {
+      playback.calls.push(`endRun:${kind}`);
     },
     pause: (): void => {
       playback.calls.push('pause');

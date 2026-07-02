@@ -25,9 +25,10 @@ describe('simulation constants', () => {
     expect(FINISH_SCORE).toBeGreaterThan(0);
   });
 
-  it('defines a player that can actually jump and boost', () => {
+  it('defines a player that can actually jump, dive and fever', () => {
     expect(PLAYER.jumpVelocity).toBeGreaterThan(0);
-    expect(PLAYER.boostMultiplier).toBeGreaterThan(1);
+    expect(PLAYER.feverMagnetMultiplier).toBeGreaterThan(1);
+    expect(PLAYER.diveAccel).toBeGreaterThan(0);
     expect(PLAYER.maxBoostSec).toBeGreaterThan(0);
     expect(PLAYER.widthM).toBeGreaterThan(0);
     expect(PLAYER.heightM).toBeGreaterThan(0);

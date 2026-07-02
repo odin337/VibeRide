@@ -7,6 +7,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-02
+
+The music-lock release: the world, the rider and every sound are now provably on the track's
+clock (Hill Climb Racing body × Piano Tiles soul × Geometry Dash pulse).
+
+### Added
+
+- **Music-master clock**: the simulation follows the latency-compensated Web Audio playhead
+  (`advanceToSongTime`); pausing suspends the AudioContext and freezes the world with the music;
+  wall-clock fallback for blocked/absent audio; auto-pause on tab hide.
+- **Combo (Piano Tiles)**: consecutive collected notes build a ×1…×4 multiplier (HUD chip),
+  lift the melody an octave, and unlock live arrangement layers on library tracks; a missed note
+  (`game:noteMiss`) kills the combo and ducks the music.
+- **Fever (reworked boost)**: no speed change — a pickup magnet (×2.5 reach), ×2 pickup score,
+  and an opened low-pass filter with extra gain. Dive (lean back airborne) accelerates the fall
+  to catch the next beat. New `game:landed` event with a quantized landing thump.
+- **Track slicing**: crashing beat-repeats the last 1/8 of the actual track buffer, shrinking
+  and slowing into a tape-stop (`crashStutterPlan`, pure + unit-tested); finishing sweeps the
+  filter open and fades out.
+- **Quantized SFX**: one shared AudioContext for music and SFX; jump/land/collect/miss one-shots
+  snap to the track's 1/16 grid (`audio/grid.ts`, pure + unit-tested).
+- **Pre-tuned track library** (`track-library.ts`): four deterministic compositions
+  (Sunset Cruise 100 BPM, Neon Runner 128, Bass Hammer 150 double-kick hardcore,
+  Midnight Drift 118) — each a BeatMap plus a live pattern-synth PatternSpec (kick/bass/hats/
+  stabs) built from the same rhythm knobs; menu shows a card grid with BPM/length/difficulty.
+- **NFT tracks**: library entries with `nftItemName` lock until the connected TON wallet owns
+  the matching NFT item (`TonModule.getOwnedSkins`); mock/disabled modules keep the game fully
+  playable without crypto.
+- **Hill-Climb-style renderer**: cartoon jeep with spinning wheels, suspension squash on
+  landing and air pitch; sky/sun/clouds/hills parallax; grass-topped dirt terrain with gap
+  warning markers and a checkered finish flag; beat-pulsing background and collectibles;
+  fever glow + exhaust; crash shake/vignette; note-miss stage dim; finish confetti
+  (all reduced-motion-aware).
+
+### Changed
+
+- **BREAKING (replays)**: horizontal speed is now a simulation constant —
+  `x = tick × SIM_DT × WORLD_SPEED_BASE` exactly; obstacles/notes are met at the precise moment
+  they sound. `PLAYER.boostMultiplier` removed in favour of `feverMagnetMultiplier`/`diveAccel`.
+  `LevelDefinition.maxScore` now equals collectible sum × `SCORE_CEILING_FACTOR` (8) +
+  `FINISH_SCORE`.
+- **Anti-cheat is exact**: every checkpoint must sit on the closed-form music-locked path
+  (±1e-6 m) — the speed-ceiling heuristic is gone; per-interval score windows account for the
+  fever magnet and combo ceiling; early crashes are no longer rejected by a minimum-duration
+  bound (bug fix); runs cannot outlive the song.
+- Menu screen redesigned around the track library; demo button replaced by track cards
+  (e2e updated accordingly).
+
 ## [0.1.0] - 2026-07-02
 
 Initial release of the VibeRide monorepo: a music-driven racing game shipped as a web game and a

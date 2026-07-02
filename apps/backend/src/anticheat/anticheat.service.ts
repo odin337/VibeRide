@@ -1,9 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import {
   CHECKPOINT_INTERVAL_TICKS,
+  COLLECT_RADIUS_M,
   FINISH_SCORE,
   PLAYER,
+  SCORE_CEILING_FACTOR,
   seedFromHash,
+  SIM_DT,
   SIM_TICK_HZ,
   WORLD_SPEED_BASE,
 } from '@viberide/shared';
@@ -15,17 +18,19 @@ import type { StoredTrack } from '../tracks/tracks.repository';
 export type AnticheatResult =
   { readonly valid: true } | { readonly valid: false; readonly violations: readonly string[] };
 
-/** Float comparison slack for positions/speeds accumulated over a run. */
-const EPS = 1e-6;
-
 /**
- * Nobody moves faster than a permanently-boosting player; the extra 25%
- * absorbs downhill acceleration and integration slack.
+ * THE MUSIC LOCK IS THE ANTI-CHEAT. Horizontal speed is a simulation
+ * constant, so a legitimate rider's X is the exact function
+ * `x = tick × SIM_DT × WORLD_SPEED_BASE` (clamped at the finish line).
+ * Every checkpoint is checked against that closed form — there is no
+ * speed "budget" to abuse, any off-path position is an instant violation.
  */
-const MAX_SPEED_MPS = WORLD_SPEED_BASE * PLAYER.boostMultiplier * 1.25;
+const POSITION_EPS_M = 1e-6;
 
-/** A run must take at least half and at most triple the track duration. */
-const MIN_DURATION_FACTOR = 0.5;
+/** A run cannot outlive the song by more than one checkpoint interval. */
+const MAX_TICK_SLACK = CHECKPOINT_INTERVAL_TICKS;
+
+/** durationMs may not exceed this multiple of the track length. */
 const MAX_DURATION_FACTOR = 3;
 
 /** `finished` tolerance: the final checkpoint may trail the line slightly. */
@@ -35,10 +40,11 @@ const FINISH_TOLERANCE_M = 5;
 const CHECKPOINT_INTERVAL_SEC = CHECKPOINT_INTERVAL_TICKS / SIM_TICK_HZ;
 
 /**
- * Pickups can straddle a checkpoint boundary by up to the collider width,
- * so per-interval score windows are widened by this margin on both sides.
+ * Pickups can straddle a checkpoint boundary by up to the widest possible
+ * reach — half the collider plus the fever-magnet radius — so per-interval
+ * score windows are widened by this margin on both sides.
  */
-const COLLECT_WINDOW_MARGIN_M = PLAYER.widthM;
+const COLLECT_WINDOW_MARGIN_M = PLAYER.widthM / 2 + COLLECT_RADIUS_M * PLAYER.feverMagnetMultiplier;
 
 interface CheckpointState {
   readonly tick: number;
@@ -75,11 +81,14 @@ export class AnticheatService {
       );
     }
 
-    const collectibleScoreCeiling = submission.collectiblesTaken * GEM_SCORE + FINISH_SCORE;
+    // Per-pickup ceiling: the priciest pickup at max combo during fever.
+    const collectibleScoreCeiling =
+      submission.collectiblesTaken * GEM_SCORE * SCORE_CEILING_FACTOR + FINISH_SCORE;
     if (submission.score > collectibleScoreCeiling) {
       violations.push(
         `score ${submission.score} exceeds the collectible score bound ` +
-          `collectiblesTaken * ${GEM_SCORE} + ${FINISH_SCORE} = ${collectibleScoreCeiling}`,
+          `collectiblesTaken * ${GEM_SCORE} * ${SCORE_CEILING_FACTOR} + ${FINISH_SCORE} ` +
+          `= ${collectibleScoreCeiling}`,
       );
     }
 
@@ -90,15 +99,14 @@ export class AnticheatService {
       );
     }
 
+    // Crashing early is always legitimate (one-touch death), so there is
+    // no lower duration bound — the final-checkpoint consistency check
+    // below pins durationMs to the tick count anyway.
     const levelDurationMs = level.durationSec * 1000;
-    if (
-      submission.durationMs < levelDurationMs * MIN_DURATION_FACTOR ||
-      submission.durationMs > levelDurationMs * MAX_DURATION_FACTOR
-    ) {
+    if (submission.durationMs > levelDurationMs * MAX_DURATION_FACTOR) {
       violations.push(
-        `durationMs ${submission.durationMs} outside the plausible range ` +
-          `[${levelDurationMs * MIN_DURATION_FACTOR}, ${levelDurationMs * MAX_DURATION_FACTOR}] ` +
-          `for a ${level.durationSec} s track`,
+        `durationMs ${submission.durationMs} above the plausible maximum ` +
+          `${levelDurationMs * MAX_DURATION_FACTOR} for a ${level.durationSec} s track`,
       );
     }
 
@@ -113,6 +121,7 @@ export class AnticheatService {
     violations: string[],
   ): void {
     const finishThresholdX = level.finishX - FINISH_TOLERANCE_M;
+    const maxTick = Math.ceil(level.durationSec * SIM_TICK_HZ) + MAX_TICK_SLACK;
     let previous = RUN_START;
 
     for (const [index, checkpoint] of submission.checkpoints.entries()) {
@@ -131,19 +140,20 @@ export class AnticheatService {
       } else if (tickGap !== CHECKPOINT_INTERVAL_TICKS) {
         violations.push(`checkpoint[${index}] tick gap ${tickGap} != ${CHECKPOINT_INTERVAL_TICKS}`);
       }
-
-      if (checkpoint.x < previous.x - EPS) {
+      if (checkpoint.tick > maxTick) {
         violations.push(
-          `checkpoint[${index}] x ${checkpoint.x} decreases (previous ${previous.x})`,
+          `checkpoint[${index}] tick ${checkpoint.tick} rides past the end of the ` +
+            `${level.durationSec} s track (max ${maxTick})`,
         );
-      } else if (tickGap > 0) {
-        const speed = (checkpoint.x - previous.x) / (tickGap / SIM_TICK_HZ);
-        if (speed > MAX_SPEED_MPS + EPS) {
-          violations.push(
-            `checkpoint[${index}] implies speed ${speed.toFixed(3)} m/s over the interval, ` +
-              `above the physical bound ${MAX_SPEED_MPS} m/s`,
-          );
-        }
+      }
+
+      // The music lock: X must sit exactly on the constant-speed path.
+      const expectedX = Math.min(checkpoint.tick * SIM_DT * WORLD_SPEED_BASE, level.finishX);
+      if (Math.abs(checkpoint.x - expectedX) > POSITION_EPS_M) {
+        violations.push(
+          `checkpoint[${index}] x ${checkpoint.x} is off the music-locked path ` +
+            `(tick ${checkpoint.tick} ⇒ x ${expectedX})`,
+        );
       }
 
       const scoreGain = checkpoint.score - previous.score;
@@ -159,7 +169,9 @@ export class AnticheatService {
             level,
             previous.x - COLLECT_WINDOW_MARGIN_M,
             checkpoint.x + COLLECT_WINDOW_MARGIN_M,
-          ) + (crossedFinish ? FINISH_SCORE : 0);
+          ) *
+            SCORE_CEILING_FACTOR +
+          (crossedFinish ? FINISH_SCORE : 0);
         if (scoreGain > allowedGain) {
           violations.push(
             `checkpoint[${index}] score gain ${scoreGain} exceeds the ${allowedGain} ` +
@@ -194,18 +206,18 @@ export class AnticheatService {
     }
 
     // The run may continue for at most one more interval past the final
-    // checkpoint, so the claimed distance is bounded accordingly.
-    const maxTrailingDistance = MAX_SPEED_MPS * CHECKPOINT_INTERVAL_SEC;
+    // checkpoint — at the CONSTANT world speed, nothing faster exists.
+    const maxTrailingDistance = WORLD_SPEED_BASE * CHECKPOINT_INTERVAL_SEC;
     if (
-      submission.distanceM < last.x - EPS ||
-      submission.distanceM > last.x + maxTrailingDistance + EPS
+      submission.distanceM < last.x - POSITION_EPS_M ||
+      submission.distanceM > last.x + maxTrailingDistance + POSITION_EPS_M
     ) {
       violations.push(
         `distanceM ${submission.distanceM} inconsistent with the final checkpoint x ${last.x}`,
       );
     }
 
-    if (submission.finished && last.x < finishThresholdX - EPS) {
+    if (submission.finished && last.x < finishThresholdX - POSITION_EPS_M) {
       violations.push(
         `finished run ends at x ${last.x}, short of the finish line at ` +
           `${level.finishX} (tolerance ${FINISH_TOLERANCE_M} m)`,

@@ -113,19 +113,19 @@ describe('AnticheatService — violation classes', () => {
     expectViolation({ ...legitimate, checkpoints }, /tick gap/);
   });
 
-  it('detects x moving backwards', () => {
+  it('detects any position off the music-locked path (backwards)', () => {
     const checkpoints = legitimate.checkpoints.map((checkpoint, index) =>
       index === 3 ? { ...checkpoint, x: 0 } : checkpoint,
     );
-    expectViolation({ ...legitimate, checkpoints }, /decreases/);
+    expectViolation({ ...legitimate, checkpoints }, /off the music-locked path/);
   });
 
-  it('detects teleport-grade speed between checkpoints', () => {
-    // 100 m in one 2 s interval = 50 m/s, far above 16 m/s boosted.
+  it('detects any position off the music-locked path (teleport)', () => {
+    // Speed is a simulation constant — even +1 m off the path is a cheat.
     const checkpoints = legitimate.checkpoints.map((checkpoint, index) =>
-      index === 1 ? { ...checkpoint, x: checkpoint.x + 100 } : checkpoint,
+      index === 1 ? { ...checkpoint, x: checkpoint.x + 1 } : checkpoint,
     );
-    expectViolation({ ...legitimate, checkpoints }, /above the physical bound/);
+    expectViolation({ ...legitimate, checkpoints }, /off the music-locked path/);
   });
 
   it('detects a decreasing score', () => {
@@ -140,9 +140,10 @@ describe('AnticheatService — violation classes', () => {
   });
 
   it('detects a score gain unobtainable within one interval', () => {
-    // +500 in the first interval, where at most a couple of pickups exist.
+    // +5000 in the first interval — far above even the max-combo fever
+    // ceiling for the couple of pickups that exist there.
     const checkpoints = legitimate.checkpoints.map((checkpoint, index) =>
-      index === 0 ? { ...checkpoint, score: checkpoint.score + 500 } : checkpoint,
+      index === 0 ? { ...checkpoint, score: checkpoint.score + 5000 } : checkpoint,
     );
     const last = checkpoints[checkpoints.length - 1];
     expectViolation(

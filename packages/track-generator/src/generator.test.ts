@@ -1,4 +1,10 @@
-import { FINISH_SCORE, HEIGHTFIELD_STEP_M, seedFromHash, WORLD_SPEED_BASE } from '@viberide/shared';
+import {
+  FINISH_SCORE,
+  HEIGHTFIELD_STEP_M,
+  SCORE_CEILING_FACTOR,
+  seedFromHash,
+  WORLD_SPEED_BASE,
+} from '@viberide/shared';
 import type { BeatMap } from '@viberide/shared';
 import { describe, expect, it } from 'vitest';
 
@@ -42,9 +48,9 @@ describe('generateLevel', () => {
     expect(level.collectibles.length).toBeGreaterThan(0);
   });
 
-  it('holds the exact maxScore invariant', () => {
+  it('holds the exact maxScore invariant (max combo during fever)', () => {
     const collectibleSum = level.collectibles.reduce((sum, c) => sum + c.score, 0);
-    expect(level.maxScore).toBe(collectibleSum + FINISH_SCORE);
+    expect(level.maxScore).toBe(collectibleSum * SCORE_CEILING_FACTOR + FINISH_SCORE);
     expect(collectibleSum).toBeGreaterThan(0);
   });
 

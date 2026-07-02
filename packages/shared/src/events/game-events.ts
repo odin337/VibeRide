@@ -19,8 +19,12 @@ export type GameEventMap = {
   'track:generated': { level: LevelDefinition };
   'game:started': { audioHash: string; seed: number };
   'game:action': { action: PlayerAction; tick: number };
+  /** Player touched ground after being airborne — the audio layer accents it. */
+  'game:landed': { tick: number };
   'game:collision': { obstacleId: string; tick: number };
   'game:collect': { collectibleId: string; score: number; tick: number };
+  /** A note scrolled past unplayed — combo dies, the music stumbles. */
+  'game:noteMiss': { collectibleId: string; tick: number };
   'game:finished': { result: RunResult };
   'ton:walletConnected': { wallet: WalletInfo };
   'ton:walletDisconnected': Record<string, never>;

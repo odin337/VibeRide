@@ -11,12 +11,14 @@ import type {
 } from '@viberide/shared';
 import { z } from 'zod';
 
+import { intensityFromCombo } from '../audio/grid';
 import { GameStateMachine } from '../engine/game-state';
 import type { GamePhase } from '../engine/game-state';
 import { RunController } from '../engine/run-controller';
 import type { SimSnapshot } from '../engine/run-controller';
 import { InputController } from '../input/input-controller';
-import { DEMO_TRACK_TITLE, generateDemoBeatMap } from './demo-beatmap';
+import { DEFAULT_LIBRARY_TRACK, generateLibraryBeatMap } from './track-library';
+import type { LibraryTrack, PatternSpec } from './track-library';
 import type { GameControllerPorts, RendererHandle } from './ports';
 
 /**
@@ -29,8 +31,10 @@ export interface LoadedTrack {
   readonly title: string;
   readonly beatMap: BeatMap;
   readonly level: LevelDefinition;
-  /** Decoded PCM for playback; null for the synthesized demo. */
+  /** Decoded PCM for playback; null for library (pattern-synth) tracks. */
   readonly pcm: Float32Array | null;
+  /** Live-synth spec for library tracks; null for user audio files. */
+  readonly pattern: PatternSpec | null;
   readonly sampleRate: number;
 }
 
@@ -47,9 +51,20 @@ export interface HudState {
   readonly distanceM: number;
   readonly boostFraction: number;
   readonly boosting: boolean;
+  /** Consecutive notes played (Piano-Tiles streak). */
+  readonly combo: number;
+  /** Multiplier the next note earns (×1…×4). */
+  readonly comboMultiplier: number;
 }
 
-const INITIAL_HUD: HudState = { score: 0, distanceM: 0, boostFraction: 1, boosting: false };
+const INITIAL_HUD: HudState = {
+  score: 0,
+  distanceM: 0,
+  boostFraction: 1,
+  boosting: false,
+  combo: 0,
+  comboMultiplier: 1,
+};
 
 /** Persisted-settings shape; anything else falls back to the defaults. */
 const settingsSchema = z.object({
@@ -84,7 +99,16 @@ export class GameController {
       options.bus.on('game:finished', ({ result }) => {
         this.onRunEnded(result);
       }),
+      // A missed note makes the music stumble — the rider IS the melody.
+      options.bus.on('game:noteMiss', () => {
+        this.options.ports.playback.duckMiss();
+      }),
     );
+    // The world is a slave of the music clock: when the tab hides, rAF
+    // stops but audio would keep running — pause both instead.
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.onVisibilityChange);
+    }
   }
 
   get bus(): GameEventBus {
@@ -172,6 +196,7 @@ export class GameController {
         beatMap,
         level,
         pcm: decoded.pcm,
+        pattern: null,
         sampleRate: decoded.sampleRate,
       };
       this.fsm.transition('ready');
@@ -182,23 +207,29 @@ export class GameController {
     }
   }
 
-  /** menu → analyzing → ready with the synthesized demo BeatMap. */
-  loadDemo(): void {
+  /** menu → analyzing → ready with a pre-tuned library track. */
+  loadLibraryTrack(libraryTrack: LibraryTrack): void {
     this.fsm.transition('analyzing');
-    this.options.bus.emit('audio:analysisStarted', { fileName: DEMO_TRACK_TITLE });
-    const beatMap = generateDemoBeatMap();
+    this.options.bus.emit('audio:analysisStarted', { fileName: libraryTrack.title });
+    const beatMap = generateLibraryBeatMap(libraryTrack);
     this.options.bus.emit('audio:analyzed', { beatMap });
     const level = this.options.ports.generateLevel(beatMap);
     this.options.bus.emit('track:generated', { level });
     this.options.bus.emit('audio:analysisProgress', { progress: 1 });
     this.track = {
-      title: DEMO_TRACK_TITLE,
+      title: libraryTrack.title,
       beatMap,
       level,
       pcm: null,
+      pattern: libraryTrack.pattern,
       sampleRate: beatMap.sampleRate,
     };
     this.fsm.transition('ready');
+  }
+
+  /** Backwards-friendly alias: rides the first (easiest) library track. */
+  loadDemo(): void {
+    this.loadLibraryTrack(DEFAULT_LIBRARY_TRACK);
   }
 
   /** ready → playing. The run itself starts when the stage mounts (attachStage). */
@@ -253,8 +284,8 @@ export class GameController {
       }
       if (track.pcm) {
         await this.options.ports.playback.startTrack(track.pcm, track.sampleRate, track.beatMap);
-      } else {
-        await this.options.ports.playback.startDemo(track.beatMap);
+      } else if (track.pattern) {
+        await this.options.ports.playback.startPattern(track.pattern, track.beatMap);
       }
     } catch (error) {
       this.logger.warn('playback unavailable, riding silent', { reason: describeError(error) });
@@ -299,6 +330,9 @@ export class GameController {
       return;
     }
     this.disposed = true;
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    }
     this.teardownRun();
     for (const unsubscribe of this.subscriptions.splice(0)) {
       unsubscribe();
@@ -306,6 +340,12 @@ export class GameController {
     this.options.ports.playback.dispose();
     this.options.ports.sfx.dispose();
   }
+
+  private readonly onVisibilityChange = (): void => {
+    if (document.visibilityState === 'hidden' && this.fsm.phase === 'playing') {
+      this.pause();
+    }
+  };
 
   private applyVolume(): void {
     this.options.ports.playback.setVolume(this.settings.volume);
@@ -324,11 +364,25 @@ export class GameController {
       return;
     }
     this.input.updateGamepads(this.options.ports.getGamepads());
-    run.advance(nowMs);
+    // MUSIC-MASTER clock: the world follows the latency-compensated song
+    // position, so the ride can never drift off the track. When the audio
+    // clock is unavailable (context blocked — silent ride) the wall clock
+    // takes over seamlessly.
+    const songSec = this.options.ports.playback.getPositionSec();
+    if (songSec !== null) {
+      run.advanceToSongTime(songSec);
+    } else {
+      run.advance(nowMs);
+    }
     const snapshot = run.snapshot();
     this.lastSnapshot = snapshot;
     this.updateHud(snapshot);
     this.options.ports.sfx.setBoostActive(snapshot.boosting);
+    // Movement shapes the music: flight filters it, fever opens it, the
+    // combo unlocks arrangement layers.
+    this.options.ports.playback.setAirborne(!snapshot.grounded && !snapshot.crashed);
+    this.options.ports.playback.setFever(snapshot.boosting);
+    this.options.ports.playback.setIntensity(intensityFromCombo(snapshot.combo));
     this.renderer?.update(snapshot, snapshot.tick * SIM_DT);
     if (run.status === 'running' || run.status === 'paused') {
       this.scheduleFrame();
@@ -342,12 +396,15 @@ export class GameController {
       distanceM: Math.round(snapshot.distanceM),
       boostFraction: Math.round(snapshot.boostFraction * 100) / 100,
       boosting: snapshot.boosting,
+      combo: snapshot.combo,
+      comboMultiplier: snapshot.comboMultiplier,
     };
     if (
       next.score === this.hud.score &&
       next.distanceM === this.hud.distanceM &&
       next.boostFraction === this.hud.boostFraction &&
-      next.boosting === this.hud.boosting
+      next.boosting === this.hud.boosting &&
+      next.combo === this.hud.combo
     ) {
       return;
     }
@@ -360,7 +417,9 @@ export class GameController {
   private onRunEnded(result: RunResult): void {
     this.lastResult = result;
     this.options.ports.sfx.setBoostActive(false);
-    this.options.ports.playback.stop();
+    // Musical ending instead of a hard cut: crash stutters and tape-stops
+    // the actual track, finish sweeps the filter open and fades out.
+    this.options.ports.playback.endRun(result.finished ? 'finished' : 'crashed');
     this.input.detach();
     if (this.frameHandle !== null) {
       this.options.ports.cancelFrame(this.frameHandle);

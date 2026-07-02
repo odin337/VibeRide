@@ -1,8 +1,12 @@
 import {
   CHECKPOINT_INTERVAL_TICKS,
+  COLLECT_RADIUS_M,
+  COMBO_STEP,
+  FEVER_SCORE_MULTIPLIER,
   FINISH_SCORE,
   GRAVITY,
   HEIGHTFIELD_STEP_M,
+  MAX_COMBO_MULTIPLIER,
   PLAYER,
   SIM_DT,
   WORLD_SPEED_BASE,
@@ -14,15 +18,22 @@ import type { LevelDefinition, Obstacle, ReplayCheckpoint, RunResult } from '@vi
  * clock — the state after N ticks is a pure function of (level, action
  * log), which is what the backend's checkpoint replay validation and the
  * determinism unit tests rely on.
+ *
+ * MUSIC LOCK: horizontal speed is CONSTANT (WORLD_SPEED_BASE), so
+ * `x = tick × SIM_DT × WORLD_SPEED_BASE` exactly. Level geometry is
+ * placed at `beatTime × WORLD_SPEED_BASE`, therefore the player crosses
+ * every obstacle/pickup at the moment it sounds in the track. Player
+ * expression lives on other axes: jump (vertical), dive (faster fall),
+ * fever (score multiplier + pickup magnet) — none of them may touch X.
  */
 
 /** Input consumed by one simulation tick. */
 export interface ActionState {
   /** One queued jump; consumed by the tick (executes only when grounded). */
   readonly jumpQueued: boolean;
-  /** Boost button currently held. */
+  /** Fever button currently held (burns the meter; never changes speed). */
   readonly boostHeld: boolean;
-  /** Lean axis in [-1, 1]: negative = lean back (slower), positive = forward. */
+  /** Lean axis in [-1, 1]: negative = dive while airborne (land sooner). */
   readonly lean: number;
 }
 
@@ -31,11 +42,18 @@ export const IDLE_ACTIONS: ActionState = { jumpQueued: false, boostHeld: false, 
 /** How far below the terrain surface a car inside a gap counts as fallen in. */
 export const GAP_CRASH_EPSILON_M = 0.05;
 
-/** Speed delta applied per unit of lean (lean back = brake, forward = push). */
-export const LEAN_SPEED_DELTA = 0.15;
+/**
+ * A collectible is missed once its X falls this far behind the player —
+ * beyond the widest possible (fever-magnet) reach, so a missed note can
+ * never become collectable again. Missing resets the combo and makes the
+ * music stumble (see 'game:noteMiss').
+ */
+export const MISS_BOUNDARY_M = PLAYER.widthM / 2 + COLLECT_RADIUS_M * PLAYER.feverMagnetMultiplier;
 
-/** Lower bound of the horizontal speed factor (full lean back). */
-export const MIN_SPEED_FACTOR = 0.5;
+/** Combo multiplier for a pickup collected after `combo` consecutive hits. */
+export function comboMultiplier(combo: number): number {
+  return Math.min(MAX_COMBO_MULTIPLIER, 1 + Math.floor(Math.max(0, combo) / COMBO_STEP));
+}
 
 /** Boost meter refill rate while grounded with the button released, sec/sec. */
 export const BOOST_REFILL_PER_SEC = 1;
@@ -46,15 +64,12 @@ export const MOVING_PLATFORM_AMPLITUDE_M = 0.3;
 /** Full oscillation period of a moving platform, seconds. */
 export const MOVING_PLATFORM_PERIOD_SEC = 2;
 
-/** Pickup reach around the player collider, metres. */
-export const COLLECT_RADIUS_M = 0.6;
-
 /** scoreSubmissionSchema caps checkpoints at 600 (20 minutes of play). */
 export const MAX_CHECKPOINTS = 600;
 
 export interface SimState {
   tick: number;
-  /** Player collider center X, metres. */
+  /** Player collider center X, metres — always tick × SIM_DT × WORLD_SPEED_BASE. */
   x: number;
   /** Player collider bottom Y, metres. */
   y: number;
@@ -62,13 +77,16 @@ export interface SimState {
   vy: number;
   grounded: boolean;
   boostSecLeft: number;
-  /** True when boost was active during the last tick. */
+  /** True when fever was active during the last tick. */
   boosting: boolean;
   crashed: boolean;
   finished: boolean;
   score: number;
   collectiblesTaken: number;
+  /** Consecutive pickups since the last miss (drives the combo multiplier). */
+  combo: number;
   readonly collected: Set<string>;
+  readonly missed: Set<string>;
   readonly checkpoints: ReplayCheckpoint[];
 }
 
@@ -85,15 +103,26 @@ export interface SimEventCollision {
 export interface SimEventCollect {
   readonly kind: 'collect';
   readonly collectibleId: string;
-  /** Points awarded by this pickup. */
+  /** Points awarded by this pickup (doubled during fever). */
   readonly score: number;
+}
+
+/** A note/gem scrolled past uncollected — the audio layer makes the music stumble. */
+export interface SimEventNoteMiss {
+  readonly kind: 'noteMiss';
+  readonly collectibleId: string;
+}
+
+export interface SimEventLand {
+  readonly kind: 'land';
 }
 
 export interface SimEventFinish {
   readonly kind: 'finish';
 }
 
-export type SimEvent = SimEventCollision | SimEventCollect | SimEventFinish;
+export type SimEvent =
+  SimEventCollision | SimEventCollect | SimEventNoteMiss | SimEventLand | SimEventFinish;
 
 /**
  * Terrain height at world X via linear interpolation over the level
@@ -168,7 +197,9 @@ export function createSimulation(level: LevelDefinition): Simulation {
       finished: false,
       score: 0,
       collectiblesTaken: 0,
+      combo: 0,
       collected: new Set<string>(),
+      missed: new Set<string>(),
       // Tick 0 is recorded up front so even a run that ends before the
       // first interval still satisfies scoreSubmissionSchema's min-1
       // checkpoint requirement (0 is aligned to the interval).
@@ -202,21 +233,38 @@ function findSolidCollision(
   return null;
 }
 
-function collectPickups(level: LevelDefinition, state: SimState, events: SimEvent[]): void {
+function collectPickups(
+  level: LevelDefinition,
+  state: SimState,
+  fever: boolean,
+  events: SimEvent[],
+): void {
   const halfW = PLAYER.widthM / 2;
+  // Fever widens the pickup reach (the "magnet") — musical reward for
+  // burning the meter, replacing the speed boost that would break sync.
+  const reach = COLLECT_RADIUS_M * (fever ? PLAYER.feverMagnetMultiplier : 1);
   for (const collectible of level.collectibles) {
-    if (state.collected.has(collectible.id)) {
+    if (state.collected.has(collectible.id) || state.missed.has(collectible.id)) {
       continue;
     }
-    const inReachX = Math.abs(collectible.x - state.x) <= halfW + COLLECT_RADIUS_M;
+    const inReachX = Math.abs(collectible.x - state.x) <= halfW + reach;
     const inReachY =
-      collectible.y >= state.y - COLLECT_RADIUS_M &&
-      collectible.y <= state.y + PLAYER.heightM + COLLECT_RADIUS_M;
+      collectible.y >= state.y - reach && collectible.y <= state.y + PLAYER.heightM + reach;
     if (inReachX && inReachY) {
+      // Piano-Tiles scoring: streaks build a multiplier, fever doubles it.
+      const gained =
+        collectible.score * comboMultiplier(state.combo) * (fever ? FEVER_SCORE_MULTIPLIER : 1);
       state.collected.add(collectible.id);
-      state.score += collectible.score;
+      state.score += gained;
       state.collectiblesTaken += 1;
-      events.push({ kind: 'collect', collectibleId: collectible.id, score: collectible.score });
+      state.combo += 1;
+      events.push({ kind: 'collect', collectibleId: collectible.id, score: gained });
+    } else if (collectible.x < state.x - MISS_BOUNDARY_M) {
+      // Scrolled past for good: the note was never played. The combo dies
+      // and the audio layer stumbles — the rider IS the melody.
+      state.missed.add(collectible.id);
+      state.combo = 0;
+      events.push({ kind: 'noteMiss', collectibleId: collectible.id });
     }
   }
 }
@@ -236,10 +284,10 @@ export function stepSimulation(sim: Simulation, input: ActionState): SimEvent[] 
   state.tick += 1;
   const timeSec = state.tick * SIM_DT;
 
-  // --- boost meter: drains while active, refills only grounded + released ---
-  const boosting = input.boostHeld && state.boostSecLeft > 0;
-  state.boosting = boosting;
-  if (boosting) {
+  // --- fever meter: drains while active, refills only grounded + released ---
+  const fever = input.boostHeld && state.boostSecLeft > 0;
+  state.boosting = fever;
+  if (fever) {
     state.boostSecLeft = Math.max(0, state.boostSecLeft - SIM_DT);
   } else if (!input.boostHeld && state.grounded) {
     state.boostSecLeft = Math.min(
@@ -248,11 +296,8 @@ export function stepSimulation(sim: Simulation, input: ActionState): SimEvent[] 
     );
   }
 
-  // --- horizontal motion (capped at the anti-cheat kinematic ceiling) ---
-  const lean = Math.min(1, Math.max(-1, input.lean));
-  const rawFactor = (boosting ? PLAYER.boostMultiplier : 1) * (1 + LEAN_SPEED_DELTA * lean);
-  const factor = Math.min(PLAYER.boostMultiplier, Math.max(MIN_SPEED_FACTOR, rawFactor));
-  state.x += WORLD_SPEED_BASE * factor * SIM_DT;
+  // --- horizontal motion: EXACT function of the tick (music lock) ---
+  state.x = state.tick * SIM_DT * WORLD_SPEED_BASE;
 
   const terrainY = sampleTerrainHeight(level, state.x);
   const gap = gapAt(level, state.x);
@@ -271,12 +316,16 @@ export function stepSimulation(sim: Simulation, input: ActionState): SimEvent[] 
     state.y = terrainY;
     state.vy = 0;
   } else {
-    state.vy += GRAVITY * SIM_DT;
+    // Dive: leaning back while airborne pulls the car down faster, letting
+    // the rider cut a jump short to catch the next beat on the ground.
+    const dive = Math.min(0, Math.max(-1, input.lean)) * -PLAYER.diveAccel;
+    state.vy += (GRAVITY - dive) * SIM_DT;
     state.y += state.vy * SIM_DT;
     if (!gap && state.vy <= 0 && state.y <= terrainY) {
       state.y = terrainY;
       state.vy = 0;
       state.grounded = true;
+      events.push({ kind: 'land' });
     }
   }
 
@@ -297,7 +346,7 @@ export function stepSimulation(sim: Simulation, input: ActionState): SimEvent[] 
 
   // --- pickups and finish line ---
   if (!state.crashed) {
-    collectPickups(level, state, events);
+    collectPickups(level, state, fever, events);
     if (state.x >= level.finishX) {
       state.finished = true;
       state.x = level.finishX;

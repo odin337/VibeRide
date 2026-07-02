@@ -1,4 +1,11 @@
-import { CHECKPOINT_INTERVAL_TICKS, FINISH_SCORE, GRAVITY, PLAYER, SIM_DT } from '@viberide/shared';
+import {
+  CHECKPOINT_INTERVAL_TICKS,
+  FINISH_SCORE,
+  GRAVITY,
+  PLAYER,
+  SIM_DT,
+  WORLD_SPEED_BASE,
+} from '@viberide/shared';
 import { generateLevel, makeBeatMap } from '@viberide/track-generator';
 import { describe, expect, it } from 'vitest';
 
@@ -102,15 +109,34 @@ describe('terrain following', () => {
   });
 });
 
-describe('boost', () => {
-  it('multiplies horizontal speed while held', () => {
-    const boosted = createSimulation(makeFlatLevel());
-    const base = createSimulation(makeFlatLevel());
+describe('music lock', () => {
+  it('keeps x an exact function of the tick regardless of input', () => {
+    const wild = createSimulation(makeFlatLevel({ lengthM: 100 }));
+    const calm = createSimulation(makeFlatLevel({ lengthM: 100 }));
+    for (let i = 0; i < 240; i += 1) {
+      stepSimulation(wild, {
+        jumpQueued: i % 30 === 0,
+        boostHeld: i % 2 === 0,
+        lean: i % 3 === 0 ? -1 : 0,
+      });
+      stepSimulation(calm, IDLE_ACTIONS);
+    }
+    // Boost, lean and jumping may NEVER move the rider off the music.
+    expect(wild.state.x).toBe(calm.state.x);
+    expect(wild.state.x).toBe(240 * SIM_DT * WORLD_SPEED_BASE);
+  });
+});
+
+describe('fever (boost)', () => {
+  it('does not change horizontal speed', () => {
+    const fevered = createSimulation(makeFlatLevel({ lengthM: 100 }));
+    const base = createSimulation(makeFlatLevel({ lengthM: 100 }));
     for (let i = 0; i < 60; i += 1) {
-      stepSimulation(boosted, BOOST);
+      stepSimulation(fevered, BOOST);
       stepSimulation(base, IDLE_ACTIONS);
     }
-    expect(boosted.state.x).toBeCloseTo(base.state.x * PLAYER.boostMultiplier, 6);
+    expect(fevered.state.boosting).toBe(true);
+    expect(fevered.state.x).toBe(base.state.x);
   });
 
   it('drains the meter at 1 s/s and cuts out when empty', () => {
@@ -126,12 +152,10 @@ describe('boost', () => {
     }
     expect(sim.state.boostSecLeft).toBe(0);
 
-    // Meter empty and still held: no boost, no refill.
-    const xBefore = sim.state.x;
+    // Meter empty and still held: no fever.
     stepSimulation(sim, BOOST);
     expect(sim.state.boosting).toBe(false);
     expect(sim.state.boostSecLeft).toBe(0);
-    expect(sim.state.x - xBefore).toBeCloseTo(8 * SIM_DT, 6);
   });
 
   it('refills only while grounded with the button released, capped at max', () => {
@@ -165,24 +189,81 @@ describe('boost', () => {
     expect(sim.state.grounded).toBe(false);
     expect(sim.state.boostSecLeft).toBe(drained);
   });
+
+  it('widens the pickup magnet and doubles the score', () => {
+    // y = 2.0 is above the normal reach (0.8 + 0.6 = 1.4) but inside the
+    // fever reach (0.8 + 0.6 × 2.5 = 2.3).
+    const high = makeCollectible({ x: 10, y: 2, score: 10 });
+    const plain = createSimulation(makeFlatLevel({ lengthM: 100, collectibles: [high] }));
+    run(plain, 120);
+    expect(plain.state.collectiblesTaken).toBe(0);
+
+    const fevered = createSimulation(makeFlatLevel({ lengthM: 100, collectibles: [high] }));
+    const events = run(fevered, 120, () => BOOST);
+    expect(fevered.state.collectiblesTaken).toBe(1);
+    expect(fevered.state.score).toBe(20); // 10 × combo ×1 × fever ×2
+    expect(events).toContainEqual({ kind: 'collect', collectibleId: high.id, score: 20 });
+  });
 });
 
-describe('lean', () => {
-  it('slows the car down when leaning back', () => {
-    const leaning = createSimulation(makeFlatLevel());
-    const base = createSimulation(makeFlatLevel());
-    for (let i = 0; i < 60; i += 1) {
-      stepSimulation(leaning, { jumpQueued: false, boostHeld: false, lean: -1 });
-      stepSimulation(base, IDLE_ACTIONS);
+describe('dive (lean back airborne)', () => {
+  const ticksToLand = (lean: number): number => {
+    const sim = createSimulation(makeFlatLevel({ lengthM: 100 }));
+    stepSimulation(sim, JUMP);
+    let ticks = 1;
+    while (!sim.state.grounded && ticks < 240) {
+      stepSimulation(sim, { jumpQueued: false, boostHeld: false, lean });
+      ticks += 1;
     }
-    expect(leaning.state.x).toBeLessThan(base.state.x);
-    expect(leaning.state.x).toBeCloseTo(base.state.x * 0.85, 6);
+    return ticks;
+  };
+
+  it('cuts the jump short to catch the next beat', () => {
+    const neutral = ticksToLand(0);
+    const dived = ticksToLand(-1);
+    expect(dived).toBeLessThan(neutral);
+    expect(neutral).toBeLessThan(240);
   });
 
-  it('never exceeds the boost kinematic ceiling', () => {
-    const sim = createSimulation(makeFlatLevel());
-    stepSimulation(sim, { jumpQueued: false, boostHeld: true, lean: 1 });
-    expect(sim.state.x).toBeCloseTo(8 * PLAYER.boostMultiplier * SIM_DT, 6);
+  it('does not change horizontal speed', () => {
+    const diving = createSimulation(makeFlatLevel({ lengthM: 100 }));
+    stepSimulation(diving, JUMP);
+    for (let i = 0; i < 59; i += 1) {
+      stepSimulation(diving, { jumpQueued: false, boostHeld: false, lean: -1 });
+    }
+    expect(diving.state.x).toBe(60 * SIM_DT * WORLD_SPEED_BASE);
+  });
+});
+
+describe('combo', () => {
+  it('raises the multiplier every COMBO_STEP pickups and resets on a miss', () => {
+    // 9 reachable notes 2 m apart, then one unreachable (missed), then one more.
+    const streak = Array.from({ length: 9 }, (_, i) =>
+      makeCollectible({ x: 5 + i * 2, y: 0.5, score: 10 }),
+    );
+    const unreachable = makeCollectible({ x: 30, y: 4, score: 10 });
+    const after = makeCollectible({ x: 36, y: 0.5, score: 10 });
+    const sim = createSimulation(
+      makeFlatLevel({ lengthM: 100, collectibles: [...streak, unreachable, after] }),
+    );
+    const events = run(sim, 60 * 6);
+
+    // First 8 at ×1 (80), the 9th at ×2 (20) = 100; then the miss resets
+    // the combo, so the final note earns ×1 (10) again.
+    expect(sim.state.score).toBe(110);
+    expect(sim.state.combo).toBe(1);
+    const misses = events.filter((event) => event.kind === 'noteMiss');
+    expect(misses).toEqual([{ kind: 'noteMiss', collectibleId: unreachable.id }]);
+  });
+});
+
+describe('landing', () => {
+  it('emits a land event when returning to the ground', () => {
+    const sim = createSimulation(makeFlatLevel({ lengthM: 100 }));
+    stepSimulation(sim, JUMP);
+    const events = run(sim, 120);
+    expect(events).toContainEqual({ kind: 'land' });
+    expect(sim.state.grounded).toBe(true);
   });
 });
 

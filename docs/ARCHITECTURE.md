@@ -139,13 +139,49 @@ Defined in `packages/shared/src/events/game-events.ts`. All payload types come f
 | `game:started`           | `{ audioHash: string; seed: number }`                    | GameEngine                          | HUD, audio playback (starts music)                        |
 | `game:action`            | `{ action: PlayerAction; tick: number }`                 | Input module                        | GameEngine (applies action at tick)                       |
 | `game:collision`         | `{ obstacleId: string; tick: number }`                   | GameEngine                          | HUD, SFX, platform haptics (`impact`)                     |
-| `game:collect`           | `{ collectibleId: string; score: number; tick: number }` | GameEngine                          | HUD (score), SFX, platform haptics (`success`)            |
+| `game:collect`           | `{ collectibleId: string; score: number; tick: number }` | GameEngine                          | HUD (score/combo), SFX (quantized pluck), renderer        |
+| `game:noteMiss`          | `{ collectibleId: string; tick: number }`                | GameEngine                          | Playback (music duck), SFX (scratch), renderer (dim)      |
+| `game:landed`            | `{ tick: number }`                                       | GameEngine                          | SFX (quantized thump), renderer (suspension squash)       |
 | `game:finished`          | `{ result: RunResult }`                                  | GameEngine                          | Results screen, ApiClient (score submission)              |
 | `ton:walletConnected`    | `{ wallet: WalletInfo }`                                 | TonIntegration wiring               | Skin gallery / wallet UI                                  |
 | `ton:walletDisconnected` | `Record<string, never>` (empty)                          | TonIntegration wiring               | Wallet UI                                                 |
 | `ton:transactionSent`    | `{ boc: string }`                                        | TonIntegration wiring               | UI (transaction confirmation toast)                       |
 
 `PlayerAction` is `'jump' | 'boost' | 'leanForward' | 'leanBack'`.
+
+## Music synchronization (the core loop)
+
+VibeRide is built so that the world, the rider and every sound are provably on the track's clock
+— Hill Climb Racing's body, Piano Tiles' soul, Geometry Dash's pulse:
+
+1. **The world IS the song.** Horizontal speed is a simulation constant
+   (`WORLD_SPEED_BASE`), so player X is the exact closed form
+   `x = tick × SIM_DT × WORLD_SPEED_BASE`. Obstacles sit at `x = bassOnset.time × speed` and
+   notes/gems at mid/high onsets — the rider crosses every one at the exact moment it sounds.
+   Nothing (fever, dive) may scale horizontal speed; expression lives on other axes.
+2. **The music is the master clock.** `PlaybackPort.getPositionSec()` returns the
+   latency-compensated playhead (`ctx.currentTime − startedAt − outputLatency`); the run
+   controller maps it 1:1 onto ticks (`advanceToSongTime`). Pausing suspends the AudioContext,
+   which freezes the position — the world stops WITH the music. If the audio clock is
+   unavailable (autoplay-blocked context), the game falls back to a wall clock and rides silent.
+   Hiding the tab auto-pauses both.
+3. **You play the melody (Piano Tiles).** Collecting a note plays a pentatonic pluck quantized
+   to the track's 1/16 grid (one shared AudioContext for music + SFX, so quantization is
+   sample-accurate); streaks build a ×1…×4 combo multiplier and lift the melody an octave;
+   a missed note kills the combo, ducks the music (`game:noteMiss`) and dims the stage.
+   On built-in library tracks the combo literally unlocks arrangement layers
+   (hats at 8, stabs at 16) in the live pattern synth.
+4. **Movement shapes the sound.** Airborne = low-pass filter dips (the music "holds its
+   breath"), landing snaps it open with a quantized thump (`game:landed`); fever (boost) is a
+   pickup magnet + ×2 score and opens the filter with extra gain — boost is heard, not run;
+   dive (lean back airborne) pulls the rider down to catch the next beat.
+5. **Endings are musical.** A crash beat-repeats the last 1/8 of the ACTUAL track buffer,
+   shrinking and slowing into a tape-stop (`crashStutterPlan` in `audio/grid.ts` — pure and
+   unit-tested); finishing sweeps the filter open and fades the song out.
+6. **Track library + NFT tracks.** `apps/web-game/src/app/track-library.ts` ships pre-tuned
+   deterministic compositions (BeatMap + live synth PatternSpec built from the same rhythm
+   knobs); entries with `nftItemName` unlock via TON NFT ownership
+   (`TonModule.getOwnedSkins`). User-uploaded mp3/ogg go through the DSP analyzer instead.
 
 ## Determinism & anti-cheat
 
@@ -188,16 +224,21 @@ On `POST /api/scores` the backend anti-cheat service checks, in order:
    choose a favourable seed.
 3. **Level regeneration**: the level is regenerated with `generateLevel` from the `BeatMap` stored
    for that `audioHash` and re-checked with `validatePlayability`; then
-   `submission.score <= level.maxScore` is enforced (collectible sum + `FINISH_SCORE` — the
-   score ceiling is a generation invariant, not a heuristic).
-4. **Checkpoint replay validation**:
-   - ticks strictly increasing and aligned to `CHECKPOINT_INTERVAL_TICKS`;
+   `submission.score <= level.maxScore` is enforced (collectible sum × `SCORE_CEILING_FACTOR`
+   - `FINISH_SCORE` — the ceiling is a generation invariant, not a heuristic).
+4. **Checkpoint replay validation — the music lock IS the anti-cheat**:
+   - ticks strictly increasing, aligned to `CHECKPOINT_INTERVAL_TICKS`, and never past the end
+     of the song (+ one interval of slack);
+   - **exact path**: horizontal speed is a simulation constant, so every checkpoint must satisfy
+     `x = min(tick × SIM_DT × WORLD_SPEED_BASE, finishX)` to within 1e-6 m — there is no speed
+     "budget" to abuse, any off-path position is an instant violation;
    - score non-decreasing across checkpoints; final checkpoint consistent with the claimed score;
-   - kinematics: per-interval Δx bounded by
-     `WORLD_SPEED_BASE × boostMultiplier × SIM_DT × Δtick` (nobody moves faster than a
-     permanently-boosting player), y within terrain + max jump height;
+     per-interval score gain bounded by the collectibles physically present in the traversed
+     window × `SCORE_CEILING_FACTOR` (max combo during fever), window widened by the
+     fever-magnet reach;
    - `distanceM` and `durationMs` consistent with the final checkpoint tick
-     (`durationMs ≈ tick × 1000 / SIM_TICK_HZ`);
+     (`durationMs ≈ tick × 1000 / SIM_TICK_HZ`); early crashes are always legitimate — there is
+     deliberately no lower duration bound;
    - `finished` implies the final x reached `finishX`.
 5. **Rate/abuse controls**: per-player throttling and per-track submission limits (HTTP 429).
 

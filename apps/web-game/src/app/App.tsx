@@ -20,6 +20,8 @@ import { MenuScreen } from './MenuScreen';
 import { ResultsScreen } from './ResultsScreen';
 import { SettingsPanel } from './SettingsPanel';
 import { TonPanel } from './TonPanel';
+import { TRACK_LIBRARY } from './track-library';
+import type { LibraryTrack } from './track-library';
 
 export interface AppProps {
   readonly controller: GameController;
@@ -47,12 +49,52 @@ export function App({
   const [error, setError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<GameSettings>(controller.currentSettings);
+  const [ownedNftNames, setOwnedNftNames] = useState<readonly string[]>([]);
 
   useEffect(() => {
     void controller.loadSettings().then(() => {
       setSettings(controller.currentSettings);
     });
   }, [controller]);
+
+  // NFT tracks unlock when the connected wallet owns the matching item.
+  useEffect(() => {
+    if (!flags.tonEnabled) {
+      return undefined;
+    }
+    let cancelled = false;
+    const refresh = (address: string | null): void => {
+      if (address === null) {
+        setOwnedNftNames([]);
+        return;
+      }
+      ton
+        .getOwnedSkins(address)
+        .then((skins) => {
+          if (!cancelled) {
+            setOwnedNftNames(skins.map((skin) => skin.name));
+          }
+        })
+        .catch((cause: unknown) => {
+          logger.warn('failed to list owned NFTs', {
+            reason: cause instanceof Error ? cause.message : String(cause),
+          });
+        });
+    };
+    refresh(ton.getWallet()?.address ?? null);
+    const unsubscribe = ton.onWalletChange((wallet) => {
+      refresh(wallet?.address ?? null);
+    });
+    return (): void => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [flags.tonEnabled, logger, ton]);
+
+  const lockedTrackIds = TRACK_LIBRARY.filter(
+    (libraryTrack) =>
+      libraryTrack.nftItemName !== undefined && !ownedNftNames.includes(libraryTrack.nftItemName),
+  ).map((libraryTrack) => libraryTrack.id);
 
   const handleFile = useCallback(
     (file: File) => {
@@ -67,12 +109,15 @@ export function App({
     [controller],
   );
 
-  const handleDemo = useCallback(() => {
-    setError(null);
-    // The demo needs no confirmation screen — the click is the gesture.
-    controller.loadDemo();
-    controller.play();
-  }, [controller]);
+  const handleSelectTrack = useCallback(
+    (libraryTrack: LibraryTrack) => {
+      setError(null);
+      // Library tracks need no confirmation screen — the click is the gesture.
+      controller.loadLibraryTrack(libraryTrack);
+      controller.play();
+    },
+    [controller],
+  );
 
   const stageRef = useCallback(
     (element: HTMLDivElement | null) => {
@@ -126,7 +171,14 @@ export function App({
         </button>
       </header>
 
-      {phase === 'menu' && <MenuScreen onFile={handleFile} onDemo={handleDemo} error={error} />}
+      {phase === 'menu' && (
+        <MenuScreen
+          onFile={handleFile}
+          onSelectTrack={handleSelectTrack}
+          lockedTrackIds={lockedTrackIds}
+          error={error}
+        />
+      )}
 
       {phase === 'analyzing' && <AnalyzingScreen bus={controller.bus} />}
 

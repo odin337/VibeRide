@@ -1,7 +1,13 @@
 import { PLAYER, SIM_TICK_HZ } from '@viberide/shared';
 import type { GameEventBus, LevelDefinition } from '@viberide/shared';
 
-import { buildRunResult, createSimulation, IDLE_ACTIONS, stepSimulation } from './physics';
+import {
+  buildRunResult,
+  comboMultiplier,
+  createSimulation,
+  IDLE_ACTIONS,
+  stepSimulation,
+} from './physics';
 import type { ActionState, Simulation } from './physics';
 
 /**
@@ -10,6 +16,14 @@ import type { ActionState, Simulation } from './physics';
  * of fast-forwarding the whole run into a wall.
  */
 export const MAX_ADVANCE_MS = 1000;
+
+/**
+ * Largest tick catch-up a single advanceToSongTime() call performs. The
+ * audio clock keeps running while rAF is throttled; when frames return,
+ * the sim fast-forwards toward the music in bounded chunks (the game
+ * controller additionally auto-pauses on tab hide, so real gaps are rare).
+ */
+export const MAX_CATCHUP_TICKS = 180;
 
 export type RunStatus = 'idle' | 'running' | 'paused' | 'ended';
 
@@ -25,6 +39,10 @@ export interface SimSnapshot {
   readonly grounded: boolean;
   readonly crashed: boolean;
   readonly finished: boolean;
+  /** Consecutive pickups since the last miss. */
+  readonly combo: number;
+  /** Score multiplier the NEXT pickup would earn (×1…×4). */
+  readonly comboMultiplier: number;
 }
 
 export interface RunControllerOptions {
@@ -40,10 +58,16 @@ export interface RunControllerOptions {
 }
 
 /**
- * Owns one run: the simulation plus the fixed-step accumulator that maps
- * irregular frame times onto exact SIM_TICK_HZ ticks. Tick targeting uses
- * integer arithmetic over total elapsed time, so N milliseconds always
- * produce the same tick count no matter how the frames were chunked.
+ * Owns one run: the simulation plus the clock mapping that converts a
+ * master timeline into exact SIM_TICK_HZ ticks.
+ *
+ * Two drive modes, both deterministic (the tick sequence is a pure
+ * function of the action log — only WHEN ticks execute differs):
+ * - advanceToSongTime(songSec): MUSIC-MASTER. The audio clock is the
+ *   timeline; tick = floor(songSec × SIM_TICK_HZ). Suspending the
+ *   AudioContext freezes the song position and therefore the world.
+ * - advance(nowMs): wall-clock fallback for silent rides (audio blocked
+ *   or unavailable). Integer targeting over accumulated elapsed time.
  */
 export class RunController {
   private readonly sim: Simulation;
@@ -80,9 +104,30 @@ export class RunController {
   }
 
   /**
-   * Advances the simulation up to `nowMs`. The first call after start,
-   * pause or resume only anchors the clock. Returns the number of ticks
-   * actually stepped.
+   * MUSIC-MASTER drive: advances the simulation to the tick matching the
+   * current song position. Never rewinds; catch-up is bounded per call.
+   * Returns the number of ticks actually stepped.
+   */
+  advanceToSongTime(songSec: number): number {
+    if (this.status_ !== 'running' || !Number.isFinite(songSec)) {
+      return 0;
+    }
+    const targetTick = Math.min(
+      Math.floor(songSec * SIM_TICK_HZ),
+      this.sim.state.tick + MAX_CATCHUP_TICKS,
+    );
+    const steps = this.stepUntil(targetTick);
+    // Keep the wall accumulator coherent so a mid-run fallback to
+    // advance() (audio device died) resumes from the same timeline.
+    this.elapsedMs = (this.sim.state.tick * 1000) / SIM_TICK_HZ;
+    this.lastNowMs = null;
+    return steps;
+  }
+
+  /**
+   * Wall-clock fallback: advances the simulation up to `nowMs`. The first
+   * call after start, pause or resume only anchors the clock. Returns the
+   * number of ticks actually stepped.
    */
   advance(nowMs: number): number {
     if (this.status_ !== 'running') {
@@ -95,17 +140,7 @@ export class RunController {
     const delta = Math.min(Math.max(nowMs - this.lastNowMs, 0), MAX_ADVANCE_MS);
     this.lastNowMs = nowMs;
     this.elapsedMs += delta;
-
-    const targetTick = Math.floor((this.elapsedMs * SIM_TICK_HZ) / 1000);
-    let steps = 0;
-    while (this.sim.state.tick < targetTick) {
-      const stillRunning = this.stepOnce();
-      steps += 1;
-      if (!stillRunning) {
-        break;
-      }
-    }
-    return steps;
+    return this.stepUntil(Math.floor((this.elapsedMs * SIM_TICK_HZ) / 1000));
   }
 
   /** Suspends the accumulator; advance() becomes a no-op until resume(). */
@@ -137,7 +172,21 @@ export class RunController {
       grounded: state.grounded,
       crashed: state.crashed,
       finished: state.finished,
+      combo: state.combo,
+      comboMultiplier: comboMultiplier(state.combo),
     };
+  }
+
+  private stepUntil(targetTick: number): number {
+    let steps = 0;
+    while (this.sim.state.tick < targetTick) {
+      const stillRunning = this.stepOnce();
+      steps += 1;
+      if (!stillRunning) {
+        break;
+      }
+    }
+    return steps;
   }
 
   /** Steps one fixed tick. Returns false when the run ended during the step. */
@@ -154,6 +203,10 @@ export class RunController {
           score: event.score,
           tick,
         });
+      } else if (event.kind === 'noteMiss') {
+        this.options.bus.emit('game:noteMiss', { collectibleId: event.collectibleId, tick });
+      } else if (event.kind === 'land') {
+        this.options.bus.emit('game:landed', { tick });
       }
     }
     if (this.sim.state.crashed || this.sim.state.finished) {

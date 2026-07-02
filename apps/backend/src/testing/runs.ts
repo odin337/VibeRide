@@ -2,6 +2,7 @@ import {
   CHECKPOINT_INTERVAL_TICKS,
   FINISH_SCORE,
   seedFromHash,
+  SIM_DT,
   SIM_TICK_HZ,
   WORLD_SPEED_BASE,
 } from '@viberide/shared';
@@ -39,7 +40,8 @@ export function buildRun(level: LevelDefinition, options: RunOptions = {}): Scor
   let nextCollectible = 0;
 
   for (let tick = CHECKPOINT_INTERVAL_TICKS; tick <= endTick; tick += CHECKPOINT_INTERVAL_TICKS) {
-    const x = (tick / SIM_TICK_HZ) * WORLD_SPEED_BASE;
+    // The exact music-locked path the simulation produces (see physics.ts).
+    const x = Math.min(tick * SIM_DT * WORLD_SPEED_BASE, level.finishX);
     for (; nextCollectible < collectibles.length; nextCollectible += 1) {
       const collectible = collectibles[nextCollectible];
       if (!collectible || collectible.x > x) {

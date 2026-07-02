@@ -1,6 +1,6 @@
 # @viberide/web-game
 
-The playable VibeRide browser game: drop an mp3/ogg (or hit **Play demo track**), the audio
+The playable VibeRide browser game: pick a pre-tuned library track (or drop your own mp3/ogg), the audio
 engine turns it into a `BeatMap`, the track generator carves a deterministic level from it, and a
 fixed-step simulation rides it — PixiJS renders, React drives the UI shell.
 

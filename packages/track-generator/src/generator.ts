@@ -1,4 +1,10 @@
-import { FINISH_SCORE, isSha256Hex, seedFromHash, WORLD_SPEED_BASE } from '@viberide/shared';
+import {
+  FINISH_SCORE,
+  isSha256Hex,
+  SCORE_CEILING_FACTOR,
+  seedFromHash,
+  WORLD_SPEED_BASE,
+} from '@viberide/shared';
 import type { BeatMap, LevelDefinition } from '@viberide/shared';
 
 import { generateCollectibles } from './collectibles';
@@ -81,8 +87,10 @@ export function generateLevel(beatMap: BeatMap): LevelDefinition {
     deriveStreamSeed(seed, COLLECTIBLE_STREAM_SALT),
     { heightfield, obstacles, finishX },
   );
+  // Theoretical ceiling: every pickup taken at max combo during fever.
   const maxScore =
-    collectibles.reduce((sum, collectible) => sum + collectible.score, 0) + FINISH_SCORE;
+    collectibles.reduce((sum, collectible) => sum + collectible.score, 0) * SCORE_CEILING_FACTOR +
+    FINISH_SCORE;
 
   return {
     version: 1,

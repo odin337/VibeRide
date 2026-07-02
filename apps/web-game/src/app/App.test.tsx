@@ -100,16 +100,16 @@ function pickFile(name: string): void {
 }
 
 describe('App', () => {
-  it('renders the menu with a file input and demo button', () => {
+  it('renders the menu with a file input and the track library', () => {
     const { root } = renderApp();
     expect(appRoot(root).dataset.gameState).toBe('menu');
     expect(screen.getByLabelText('Choose an audio track')).toBeDefined();
-    expect(screen.getByRole('button', { name: 'Play demo track' })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Sunset Cruise' })).toBeDefined();
   });
 
   it('starts the demo run and exposes data-game-state="playing" with a HUD', async () => {
     const { root, fakes } = renderApp();
-    fireEvent.click(screen.getByRole('button', { name: 'Play demo track' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sunset Cruise' }));
 
     expect(appRoot(root).dataset.gameState).toBe('playing');
     await waitFor(() => {
@@ -172,7 +172,7 @@ describe('App', () => {
 
   it('shows the crash results screen and returns to the menu', async () => {
     const { root, fakes } = renderApp();
-    fireEvent.click(screen.getByRole('button', { name: 'Play demo track' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sunset Cruise' }));
     await waitFor(() => {
       expect(fakes.rendererCreations).toBe(1);
     });
@@ -192,7 +192,7 @@ describe('App', () => {
 
   it('pauses and resumes from the overlay', async () => {
     const { root, fakes } = renderApp();
-    fireEvent.click(screen.getByRole('button', { name: 'Play demo track' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sunset Cruise' }));
     await waitFor(() => {
       expect(fakes.rendererCreations).toBe(1);
     });

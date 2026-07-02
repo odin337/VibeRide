@@ -3,7 +3,7 @@ import type { GameEventMap, HapticKind, PlatformAdapter, SaveStorage } from '@vi
 import { describe, expect, it } from 'vitest';
 
 import { makeFlatLevel } from '../engine/testing/levels';
-import { DEMO_TRACK_TITLE } from './demo-beatmap';
+import { DEFAULT_LIBRARY_TRACK } from './track-library';
 import { GameController } from './game-controller';
 import { makeFakePorts } from './testing/fake-ports';
 import type { FakePortsHarness, FakePortsOverrides } from './testing/fake-ports';
@@ -84,13 +84,14 @@ function makeHarness(
 }
 
 describe('GameController analysis flows', () => {
-  it('runs menu → analyzing → ready for the demo and stores the track', () => {
+  it('runs menu → analyzing → ready for a library track and stores it', () => {
     const { controller, events } = makeHarness();
     controller.loadDemo();
     expect(controller.fsm.phase).toBe('ready');
-    expect(controller.loadedTrack?.title).toBe(DEMO_TRACK_TITLE);
+    expect(controller.loadedTrack?.title).toBe(DEFAULT_LIBRARY_TRACK.title);
     expect(controller.loadedTrack?.pcm).toBeNull();
-    expect(events['audio:analysisStarted']).toEqual([{ fileName: DEMO_TRACK_TITLE }]);
+    expect(controller.loadedTrack?.pattern).toBe(DEFAULT_LIBRARY_TRACK.pattern);
+    expect(events['audio:analysisStarted']).toEqual([{ fileName: DEFAULT_LIBRARY_TRACK.title }]);
     expect(events['audio:analyzed']).toHaveLength(1);
     expect(events['track:generated']).toHaveLength(1);
   });
@@ -133,7 +134,7 @@ describe('GameController run lifecycle', () => {
 
     expect(harness.controller.fsm.phase).toBe('playing');
     expect(harness.events['game:started']).toHaveLength(1);
-    expect(harness.fakes.playback.calls).toContain('startDemo');
+    expect(harness.fakes.playback.calls).toContain('startPattern');
     expect(harness.fakes.rendererCreations).toBe(1);
 
     harness.fakes.fireFrame(0); // anchor
@@ -152,7 +153,8 @@ describe('GameController run lifecycle', () => {
     }
     expect(harness.controller.fsm.phase).toBe('crashed');
     expect(harness.controller.latestResult?.finished).toBe(false);
-    expect(harness.fakes.playback.calls).toContain('stop');
+    // The music breaks musically (stutter + tape stop), not with a hard cut.
+    expect(harness.fakes.playback.calls).toContain('endRun:crashed');
     expect(harness.events['game:finished']).toHaveLength(1);
     expect(harness.fakes.sfx.boostActive).toBe(false);
     expect(harness.haptics).toEqual(['error']);
@@ -227,6 +229,70 @@ describe('GameController run lifecycle', () => {
     harness.fakes.fireFrame(0);
     harness.fakes.fireFrame(100);
     expect(harness.controller.latestSnapshot?.tick).toBe(6);
+  });
+});
+
+describe('GameController music-master clock', () => {
+  it('drives the simulation from the audio position when available', async () => {
+    const harness = makeHarness();
+    await harness.startDemoRun();
+    // Audio clock present: ticks follow the song, not the frame times.
+    harness.fakes.playback.positionSec = 2;
+    harness.fakes.fireFrame(123456); // wall time is irrelevant
+    expect(harness.controller.latestSnapshot?.tick).toBe(120);
+
+    // Music paused/frozen → the world freezes with it.
+    harness.fakes.fireFrame(999999);
+    expect(harness.controller.latestSnapshot?.tick).toBe(120);
+
+    harness.fakes.playback.positionSec = 2.5;
+    harness.fakes.fireFrame(999999);
+    expect(harness.controller.latestSnapshot?.tick).toBe(150);
+  });
+
+  it('pushes movement state into the music layer every frame', async () => {
+    const harness = makeHarness();
+    await harness.startDemoRun();
+    harness.fakes.playback.positionSec = 0.5;
+    harness.fakes.fireFrame(0);
+    // Grounded, no fever at start.
+    expect(harness.fakes.playback.airborne).toBe(false);
+    expect(harness.fakes.playback.fever).toBe(false);
+    expect(harness.fakes.playback.intensity).toBe(0);
+  });
+
+  it('ends a finished run with the musical finish sweep', async () => {
+    const harness = makeHarness({}, { generateLevel: () => makeFlatLevel({ lengthM: 40 }) });
+    await harness.startDemoRun();
+    harness.fakes.playback.positionSec = 6; // song position past the finish
+    harness.fakes.fireFrame(0);
+    harness.fakes.fireFrame(100);
+    expect(harness.controller.fsm.phase).toBe('finished');
+    expect(harness.fakes.playback.calls).toContain('endRun:finished');
+  });
+
+  it('ducks the music when a note is missed', () => {
+    const harness = makeHarness();
+    harness.controller.bus.emit('game:noteMiss', { collectibleId: 'col-1', tick: 60 });
+    expect(harness.fakes.playback.duckCount).toBe(1);
+  });
+
+  it('auto-pauses when the tab is hidden mid-run', async () => {
+    const harness = makeHarness();
+    await harness.startDemoRun();
+    expect(harness.controller.fsm.phase).toBe('playing');
+    const original = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(harness.controller.fsm.phase).toBe('paused');
+    if (original) {
+      Object.defineProperty(Document.prototype, 'visibilityState', original);
+    }
+    delete (document as { visibilityState?: unknown }).visibilityState;
+    harness.controller.destroy();
   });
 });
 

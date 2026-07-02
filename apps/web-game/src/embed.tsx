@@ -57,14 +57,17 @@ export function createGame(container: HTMLElement, options: CreateGameOptions): 
   };
   const ton = createTonModule(flags.tonEnabled, tonConfig, 'tonconnect', logger);
 
+  // One shared AudioContext: SFX quantize onto the same sample clock the
+  // music runs on (playback.sync), so every sound lands on the grid.
+  const playback = createTrackPlayback(bus, logger);
   const ports: GameControllerPorts = {
     decodeAudio: (bytes) => decodeAudioFile(bytes),
     analyze: (pcm, sampleRate, audioHash) => analyzePcm(pcm, sampleRate, audioHash),
     generateLevel: (beatMap) => generateLevel(beatMap),
     createRenderer: (element, level, rendererOptions) =>
       createPixiRenderer(element, level, rendererOptions),
-    playback: createTrackPlayback(bus, logger),
-    sfx: createSfx(bus, logger),
+    playback,
+    sfx: createSfx(bus, playback.sync, logger),
     now: () => performance.now(),
     requestFrame: (callback) => window.requestAnimationFrame(callback),
     cancelFrame: (handle) => {
