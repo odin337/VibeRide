@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "@ton/core": "^0.60.1",
-    "@tonconnect/ui": "^2.1.0",
+    "@tonconnect/ui": "^5.0.1",
     "@viberide/shared": "workspace:*",
     "zod": "^3.25.67"
   },
