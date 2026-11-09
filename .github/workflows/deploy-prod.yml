@@ -39,7 +39,7 @@ jobs:
     environment: production
     steps:
       - name: Deploy new tag (records previous tag for rollback)
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         env:
           DEPLOY_TAG: ${{ inputs.tag }}
         with:
@@ -61,7 +61,7 @@ jobs:
             docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
             docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build --remove-orphans
       - name: Health check
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.PROD_SSH_HOST }}
           username: ${{ secrets.PROD_SSH_USER }}
@@ -80,7 +80,7 @@ jobs:
             exit 1
       - name: Automatic rollback to previous tag
         if: failure()
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.PROD_SSH_HOST }}
           username: ${{ secrets.PROD_SSH_USER }}
@@ -106,7 +106,7 @@ jobs:
     environment: production
     steps:
       - name: Redeploy previous tag
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         env:
           ROLLBACK_TAG: ${{ inputs.previous_tag }}
         with:
@@ -124,7 +124,7 @@ jobs:
             docker compose -f docker-compose.yml -f docker-compose.staging.yml pull
             docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d --no-build --remove-orphans
       - name: Health check
-        uses: appleboy/ssh-action@v1.2.0
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.PROD_SSH_HOST }}
           username: ${{ secrets.PROD_SSH_USER }}
